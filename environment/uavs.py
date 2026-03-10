@@ -27,8 +27,11 @@ class UAV:
         self._neighbors: list[UAV] = []
         self._current_collaborator: UAV | None = None
         self._energy_current_slot: float = 0.0  # Energy consumed for this time slot
+        self.failed: bool = False  # Permanently inactive for the rest of the episode once collided
+        self._failed_this_step: bool = False  # Distinguish current-slot crash from historical failure
         self.collision_violation: bool = False  # Track if UAV has violated minimum separation
         self.boundary_violation: bool = False  # Track if UAV has gone out of bounds
+        self._proximity_penalty: float = 0.0  # Continuous safety penalty accumulated in current slot
 
         # Cache and request tracking
         self._current_requested_files: np.ndarray = np.zeros(config.NUM_FILES, dtype=bool)
@@ -101,11 +104,33 @@ class UAV:
     def current_collaborator(self) -> UAV | None:
         return self._current_collaborator
 
+    @property
+    def active(self) -> bool:
+        return not self.failed
+
+    @property
+    def proximity_penalty(self) -> float:
+        return self._proximity_penalty
+
+    def add_proximity_penalty(self, penalty: float) -> None:
+        self._proximity_penalty += penalty
+
+    def clear_proximity_penalty(self) -> None:
+        self._proximity_penalty = 0.0
+
+    def mark_failed(self) -> None:
+        if self.failed:
+            return
+        self.failed = True
+        self._failed_this_step = True
+        self.collision_violation = True
+        self.clear_proximity_penalty()
+
     def reset_for_next_step(self) -> None:
         """Reset UAV state for a new time slot.
         
-        注意：_backlog_* 变量不在这里重置，因为它们是跨时隙的。
-        它们在 episode 开始时通过 UAV.__init__() 初始化为 0。
+        注意：正常 UAV 的 _backlog_* 变量不在这里重置，因为它们是跨时隙的。
+        failed UAV 会在这里清空积压，因为它们已永久退出服务流程。
         """
         self._current_covered_ues = []
         self._neighbors = []
@@ -124,12 +149,24 @@ class UAV:
         self._rx_time_uav_uav_as_collaborator = {}
         self._tx_time_uav_mbs = 0.0
         self._rx_time_uav_mbs = 0.0
-        # 注意：_backlog_* 不重置，跨时隙保持
+        if self.failed:
+            # failed UAV 永久退出服务，清空所有积压、避免影响后续统计
+            self._backlog_tx_ue_uav = 0.0
+            self._backlog_rx_ue_uav = 0.0
+            self._backlog_tx_uav_uav_as_requester = {}
+            self._backlog_rx_uav_uav_as_requester = {}
+            self._backlog_tx_uav_uav_as_collaborator = {}
+            self._backlog_rx_uav_uav_as_collaborator = {}
+            self._backlog_tx_uav_mbs = 0.0
+            self._backlog_rx_uav_mbs = 0.0
+        # 活跃 UAV 的 _backlog_* 跨时隙保持，不在此重置
         self._num_requesting_uavs = 0  # 重置被选为协作者的计数
         self._beam_offset = (0.0, 0.0)  # 重置波束偏移
         self._total_downlink_rate = 0.0  # 重置传输速率记录
         self.collision_violation = False
         self.boundary_violation = False
+        self._proximity_penalty = 0.0
+        self._failed_this_step = False
 
     def update_position(self, next_pos: np.ndarray) -> None:
         """Update the UAV's position to the new 3D location chosen by the MARL agent."""
@@ -140,14 +177,18 @@ class UAV:
     def set_neighbors(self, all_uavs: list[UAV]) -> None:
         """Set neighboring UAVs within sensing range for this UAV."""
         self._neighbors = []
+        if self.failed:
+            return
         for other_uav in all_uavs:
-            if other_uav.id != self.id:
+            if other_uav.id != self.id and other_uav.active:
                 distance = float(np.linalg.norm(self.pos - other_uav.pos))
                 if distance <= config.UAV_SENSING_RANGE:
                     self._neighbors.append(other_uav)
 
     def set_current_requested_files(self) -> None:
         """Update the current requested files and beam direction based on covered UEs."""
+        if self.failed:
+            return
         for ue in self._current_covered_ues:
             if ue.current_request:
                 _, _, req_id = ue.current_request
@@ -194,6 +235,9 @@ class UAV:
         注意：_set_rates() 已移至 env.py 中统一调用，
         因为需要先统计所有 UAV 的 _num_requesting_uavs。
         """
+        if self.failed:
+            self._current_collaborator = None
+            return
         if not self._neighbors:
             return
 
@@ -249,6 +293,8 @@ class UAV:
 
     def set_freq_counts(self) -> None:
         """Set the request count for current slot based on cache availability."""
+        if self.failed:
+            return
         for ue in self._current_covered_ues:
             _, _, req_id = ue.current_request
             self._freq_counts[req_id] += 1
@@ -265,6 +311,8 @@ class UAV:
 
     def process_requests(self) -> None:
         """Process content requests from UEs covered by this UAV."""
+        if self.failed:
+            return
         final_beam = self.get_final_beam_direction()
         for ue in self._current_covered_ues:
             channel_gain = comms.calculate_channel_gain(ue.pos, self.pos, final_beam)
@@ -288,6 +336,11 @@ class UAV:
         - 如果一个 UAV 被多个邻居选为协作者，其 UAV-UAV 带宽需要平分
         - 带宽分割发生在协作者端，请求方端不分割
         """
+        if self.failed:
+            self._uav_uav_rate = 0.0
+            self._uav_mbs_uplink_rate = 0.0
+            self._uav_mbs_downlink_rate = 0.0
+            return
         mbs_channel_gain = comms.calculate_channel_gain(self.pos, config.MBS_POS)
         self._uav_mbs_uplink_rate = comms.calculate_uav_mbs_uplink_rate(mbs_channel_gain)
         self._uav_mbs_downlink_rate = comms.calculate_uav_mbs_downlink_rate(mbs_channel_gain)
@@ -435,11 +488,15 @@ class UAV:
 
     def update_ema_and_cache(self) -> None:
         """Update EMA scores and cache reactively."""
+        if self.failed:
+            return
         self._ema_scores = config.GDSF_SMOOTHING_FACTOR * self._freq_counts + (1 - config.GDSF_SMOOTHING_FACTOR) * self._ema_scores
         self.cache = self._working_cache.copy()  # Update cache after processing all requests of all UAVs
 
     def gdsf_cache_update(self) -> None:
         """Update cache using the GDSF caching policy at a longer timescale."""
+        if self.failed:
+            return
         priority_scores = self._ema_scores / config.FILE_SIZES
         sorted_file_ids = np.argsort(-priority_scores)
         self.cache = np.zeros(config.NUM_FILES, dtype=bool)
@@ -463,6 +520,9 @@ class UAV:
         - 飞行能耗：移动 + 悬停，占满整个时隙
         - 通信能耗：发送功率 × 发送时间 + 接收功率 × 接收时间
         """
+        if self.failed and not self._failed_this_step:
+            self._energy_current_slot = 0.0
+            return
         # 1. 飞行能耗（移动 + 悬停，占满整个时隙）
         # 注：碰撞消解/边界裁剪可能导致实际位移略超出 v*tau，造成 time_hovering 出现极小负数。
         # 这里对时间进行夹紧以保证能耗数值稳定。

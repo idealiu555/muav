@@ -5,6 +5,54 @@ import numpy as np
 # 基于强化学习框架，模拟多无人机（UAV）空中基站通信保障环境，管理 UAV、用户设备（UE）和宏基站（MBS）的状态、动作和奖励。
 
 
+def _min_distance_on_interval(rel_pos: np.ndarray, rel_vel: np.ndarray, duration: float) -> float:
+    """Return the minimum distance for synchronous linear relative motion on [0, duration]."""
+    if duration <= 0.0:
+        return float(np.linalg.norm(rel_pos))
+
+    vel_sq = float(np.dot(rel_vel, rel_vel))
+    if vel_sq <= float(config.EPSILON):
+        return float(np.linalg.norm(rel_pos))
+
+    t_star = -float(np.dot(rel_pos, rel_vel)) / vel_sq
+    t_star = float(np.clip(t_star, 0.0, duration))
+    closest_delta = rel_pos + rel_vel * t_star
+    return float(np.linalg.norm(closest_delta))
+
+
+def _synchronous_trajectory_min_distance(
+    p0: np.ndarray,
+    p1: np.ndarray,
+    p_move_time: float,
+    q0: np.ndarray,
+    q1: np.ndarray,
+    q_move_time: float,
+) -> float:
+    """Return the minimum same-time distance over one slot for move-then-hover trajectories."""
+    slot_duration = float(config.TIME_SLOT_DURATION)
+    p_vel = np.zeros(3, dtype=np.float64) if p_move_time <= float(config.EPSILON) else (p1 - p0) / p_move_time
+    q_vel = np.zeros(3, dtype=np.float64) if q_move_time <= float(config.EPSILON) else (q1 - q0) / q_move_time
+    breakpoints = sorted({
+        0.0,
+        float(np.clip(p_move_time, 0.0, slot_duration)),
+        float(np.clip(q_move_time, 0.0, slot_duration)),
+        slot_duration,
+    })
+
+    min_dist = float("inf")
+    for start_t, end_t in zip(breakpoints[:-1], breakpoints[1:]):
+        duration = end_t - start_t
+        p_pos = p0 + p_vel * min(start_t, p_move_time)
+        q_pos = q0 + q_vel * min(start_t, q_move_time)
+        interval_p_vel = p_vel if start_t < p_move_time else np.zeros_like(p_vel)
+        interval_q_vel = q_vel if start_t < q_move_time else np.zeros_like(q_vel)
+        rel_pos = p_pos - q_pos
+        rel_vel = interval_p_vel - interval_q_vel
+        min_dist = min(min_dist, _min_distance_on_interval(rel_pos, rel_vel, duration))
+
+    return min_dist
+
+
 class RunningNormalizer:
     """使用指数移动平均的动态归一化器，用于平衡多目标奖励的量级。
     
@@ -108,6 +156,7 @@ class Env:
             uav.update_energy_consumption()
 
         rewards, metrics = self._get_rewards_and_metrics()
+        self._clear_failed_uav_peer_backlogs()
 
         if self._time_step % config.T_CACHE_UPDATE_INTERVAL == 0:
             for uav in self._uavs:
@@ -169,12 +218,32 @@ class Env:
         for uav in self._uavs:
             uav.set_freq_counts()
 
+    def _clear_failed_uav_peer_backlogs(self) -> None:
+        """Remove cross-UAV backlog entries pointing to permanently failed UAVs."""
+        failed_ids = {uav.id for uav in self._uavs if uav.failed}
+        if not failed_ids:
+            return
+
+        for uav in self._uavs:
+            uav._backlog_tx_uav_uav_as_requester = {
+                k: v for k, v in uav._backlog_tx_uav_uav_as_requester.items() if k not in failed_ids
+            }
+            uav._backlog_rx_uav_uav_as_requester = {
+                k: v for k, v in uav._backlog_rx_uav_uav_as_requester.items() if k not in failed_ids
+            }
+            uav._backlog_tx_uav_uav_as_collaborator = {
+                k: v for k, v in uav._backlog_tx_uav_uav_as_collaborator.items() if k not in failed_ids
+            }
+            uav._backlog_rx_uav_uav_as_collaborator = {
+                k: v for k, v in uav._backlog_rx_uav_uav_as_collaborator.items() if k not in failed_ids
+            }
+
     def _get_obs(self) -> list[np.ndarray]:
         """Construct local observation vector for each UAV agent.
 
         新观测结构（支持注意力机制）：
-        - Own state: normalized position (3) + cache bitmap (NUM_FILES)
-        - Neighbors (MAX_UAV_NEIGHBORS): features (25) + count (1)
+        - Own state: normalized position (3) + cache bitmap (NUM_FILES) + is_active (1)
+        - Neighbors (MAX_UAV_NEIGHBORS): features (26) + count (1)
         - Associated UEs (MAX_ASSOCIATED_UES): features (5) + count (1)
 
         关键改进：不再截断 UE 列表，包含所有关联的 UE，通过 count 字段生成 mask
@@ -187,8 +256,9 @@ class Env:
         for uav in self._uavs:
             # Part 1: Own state (position and cache status)
             own_pos: np.ndarray = uav.pos / pos_norm
-            own_cache: np.ndarray = uav.cache.astype(np.float32)
-            own_state: np.ndarray = np.concatenate([own_pos, own_cache])
+            own_cache: np.ndarray = uav.cache.astype(np.float32) if uav.active else np.zeros(config.NUM_FILES, dtype=np.float32)
+            own_is_active = np.array([1.0 if uav.active else 0.0], dtype=np.float32)
+            own_state: np.ndarray = np.concatenate([own_pos, own_cache, own_is_active])
 
             # Part 2: Neighbors state
             neighbor_states: np.ndarray = np.zeros((config.MAX_UAV_NEIGHBORS, config.NEIGHBOR_STATE_DIM))
@@ -204,22 +274,26 @@ class Env:
             for i, neighbor in enumerate(neighbors):
                 relative_pos: np.ndarray = (neighbor.pos - uav.pos) / config.UAV_SENSING_RANGE
                 # 原始 cache bitmap（让注意力机制学习）
-                neighbor_cache: np.ndarray = neighbor.cache.astype(np.float32)
+                neighbor_cache: np.ndarray = (neighbor.cache.astype(np.float32)
+                                              if neighbor.active else np.zeros(config.NUM_FILES, dtype=np.float32))
                 # 预处理特征（编码领域知识）
                 immediate_help = 0.0
-                for file_id in my_requested_files:
-                    if neighbor.cache[file_id]:
-                        immediate_help = 1.0
-                        break
-                intersection = np.sum(np.logical_and(uav.cache, neighbor.cache))
-                union = np.sum(np.logical_or(uav.cache, neighbor.cache))
-                similarity = intersection / (union + config.EPSILON)
-                complementarity = 1.0 - similarity
-                # 混合特征: pos(3) + cache(NUM_FILES) + immediate_help(1) + complementarity(1)
+                complementarity = 0.0
+                if neighbor.active:
+                    for file_id in my_requested_files:
+                        if neighbor.cache[file_id]:
+                            immediate_help = 1.0
+                            break
+                    intersection = np.sum(np.logical_and(uav.cache, neighbor.cache))
+                    union = np.sum(np.logical_or(uav.cache, neighbor.cache))
+                    similarity = intersection / (union + config.EPSILON)
+                    complementarity = 1.0 - similarity
+                neighbor_is_active = 1.0 if neighbor.active else 0.0
+                # 混合特征: pos(3) + cache(NUM_FILES) + immediate_help(1) + complementarity(1) + is_active(1)
                 neighbor_states[i, :] = np.concatenate([
                     relative_pos,
                     neighbor_cache,
-                    np.array([immediate_help, complementarity], dtype=np.float32)
+                    np.array([immediate_help, complementarity, neighbor_is_active], dtype=np.float32)
                 ])
 
             # 邻居数量（用于生成 mask）
@@ -264,81 +338,74 @@ class Env:
         return all_obs
 
     def _apply_actions_to_env(self, actions: np.ndarray) -> None:
-        """Calculates next 3D positions and resolves potential collisions iteratively."""
-        current_positions: np.ndarray = np.array([uav.pos for uav in self._uavs])  # Full 3D positions
+        """Apply bounded movement, then evaluate continuous-time safety on active UAV trajectories."""
+        current_positions: np.ndarray = np.array([uav.pos for uav in self._uavs], dtype=np.float64)
+        next_positions: np.ndarray = current_positions.copy()
+        move_times: np.ndarray = np.zeros(config.NUM_UAVS, dtype=np.float64)
         max_dist: float = config.UAV_SPEED * config.TIME_SLOT_DURATION
-
-        # Extract movement actions (first 3 dimensions: dx, dy, dz)
-        movement_actions: np.ndarray = np.array(actions[:, :3], dtype=np.float32)
-
-        # Interpret actions as a direct (x, y, z) vector
-        delta_vec_raw: np.ndarray = movement_actions
-
-        # Calculate the magnitude (distance) of this raw 3D vector
-        raw_magnitude: np.ndarray = np.linalg.norm(delta_vec_raw, axis=1, keepdims=True)
-
-        # Clip the magnitude to be at most 1.0
-        clipped_magnitude: np.ndarray = np.minimum(raw_magnitude, 1.0)
-        distances: np.ndarray = clipped_magnitude * max_dist
-        denom: np.ndarray = raw_magnitude + float(config.EPSILON)
-        directions: np.ndarray = delta_vec_raw / denom
-        delta_pos: np.ndarray = directions * distances
-
-        proposed_positions: np.ndarray = current_positions + delta_pos
-
-        # Check boundary violations (3D)
         min_boundary_gap: float = config.UAV_COVERAGE_RADIUS / 2.0
-        for i, uav in enumerate(self._uavs):
-            in_xy_bounds = (min_boundary_gap <= proposed_positions[i, 0] <= config.AREA_WIDTH - min_boundary_gap and 
-                           min_boundary_gap <= proposed_positions[i, 1] <= config.AREA_HEIGHT - min_boundary_gap)
-            in_z_bounds = config.UAV_MIN_ALT <= proposed_positions[i, 2] <= config.UAV_MAX_ALT
-            if not (in_xy_bounds and in_z_bounds):
-                uav.boundary_violation = True
-        
-        # Clip to valid 3D boundaries
-        next_positions: np.ndarray = np.clip(
-            proposed_positions, 
-            [min_boundary_gap, min_boundary_gap, config.UAV_MIN_ALT], 
-            [config.AREA_WIDTH - min_boundary_gap, config.AREA_HEIGHT - min_boundary_gap, config.UAV_MAX_ALT]
-        )
+        active_indices: list[int] = [i for i, uav in enumerate(self._uavs) if uav.active]
 
-        # 3D collision detection and resolution
-        min_sep_sq: float = config.MIN_UAV_SEPARATION**2
-        for _ in range(config.COLLISION_AVOIDANCE_ITERATIONS + 1):
-            collision_detected_in_iter: bool = False
-            for i in range(config.NUM_UAVS):
-                for j in range(i + 1, config.NUM_UAVS):
-                    pos_i: np.ndarray = next_positions[i]
-                    pos_j: np.ndarray = next_positions[j]
-                    dist_sq: float = np.sum((pos_i - pos_j) ** 2)  # 3D distance squared
-                    if dist_sq < min_sep_sq:
-                        self._uavs[i].collision_violation = True
-                        self._uavs[j].collision_violation = True
-                        collision_detected_in_iter = True
-                        
-                        dist: float = np.sqrt(dist_sq)
-                        if dist < config.EPSILON:
-                            # If positions are identical, apply random 3D direction
-                            direction = np.random.randn(3)
-                            direction /= (np.linalg.norm(direction) + config.EPSILON)
-                            dist = config.EPSILON
-                        else:
-                            direction = (pos_i - pos_j) / dist
-                            
-                        overlap: float = config.MIN_UAV_SEPARATION - dist
-                        next_positions[i] += direction * overlap * 0.5
-                        next_positions[j] -= direction * overlap * 0.5
-            if not collision_detected_in_iter:
-                break
+        if active_indices:
+            movement_actions: np.ndarray = np.array(actions[:, :3], dtype=np.float64)
+            delta_vec_raw: np.ndarray = movement_actions[active_indices]
+            raw_magnitude: np.ndarray = np.linalg.norm(delta_vec_raw, axis=1, keepdims=True)
+            clipped_magnitude: np.ndarray = np.minimum(raw_magnitude, 1.0)
+            distances: np.ndarray = clipped_magnitude * max_dist
+            denom: np.ndarray = raw_magnitude + float(config.EPSILON)
+            directions: np.ndarray = delta_vec_raw / denom
+            delta_pos: np.ndarray = directions * distances
+            proposed_positions: np.ndarray = current_positions[active_indices] + delta_pos
 
-        # Final clip to ensure within 3D boundaries after collision resolution
-        final_positions: np.ndarray = np.clip(
-            next_positions, 
-            [min_boundary_gap, min_boundary_gap, config.UAV_MIN_ALT], 
-            [config.AREA_WIDTH - min_boundary_gap, config.AREA_HEIGHT - min_boundary_gap, config.UAV_MAX_ALT]
-        )
+            for local_idx, uav_idx in enumerate(active_indices):
+                proposed = proposed_positions[local_idx]
+                in_xy_bounds = (min_boundary_gap <= proposed[0] <= config.AREA_WIDTH - min_boundary_gap and
+                                min_boundary_gap <= proposed[1] <= config.AREA_HEIGHT - min_boundary_gap)
+                in_z_bounds = config.UAV_MIN_ALT <= proposed[2] <= config.UAV_MAX_ALT
+                if not (in_xy_bounds and in_z_bounds):
+                    self._uavs[uav_idx].boundary_violation = True
+
+            next_positions[active_indices] = np.clip(
+                proposed_positions,
+                [min_boundary_gap, min_boundary_gap, config.UAV_MIN_ALT],
+                [config.AREA_WIDTH - min_boundary_gap, config.AREA_HEIGHT - min_boundary_gap, config.UAV_MAX_ALT]
+            )
+            actual_distances = np.linalg.norm(next_positions[active_indices] - current_positions[active_indices], axis=1)
+            move_times[active_indices] = actual_distances / (config.UAV_SPEED + float(config.EPSILON))
+            move_times[active_indices] = np.clip(move_times[active_indices], 0.0, config.TIME_SLOT_DURATION)
+
+        pair_distances: list[tuple[int, int, float, bool]] = []
+        collided_indices: set[int] = set()
+        unsafe_span = config.UNSAFE_UAV_DISTANCE - config.COLLISION_DISTANCE
+        for idx_i, i in enumerate(active_indices):
+            for j in active_indices[idx_i + 1:]:
+                min_dist = _synchronous_trajectory_min_distance(
+                    current_positions[i], next_positions[i], move_times[i],
+                    current_positions[j], next_positions[j], move_times[j]
+                )
+                pair_collided = min_dist <= config.COLLISION_DISTANCE
+                pair_distances.append((i, j, min_dist, pair_collided))
+                if pair_collided:
+                    collided_indices.add(i)
+                    collided_indices.add(j)
+
+        for uav_idx in collided_indices:
+            self._uavs[uav_idx].mark_failed()
+
+        if unsafe_span > 0.0:
+            for i, j, min_dist, pair_collided in pair_distances:
+                if pair_collided:
+                    continue
+                if min_dist < config.UNSAFE_UAV_DISTANCE:
+                    ratio = (config.UNSAFE_UAV_DISTANCE - min_dist) / unsafe_span
+                    penalty = config.UNSAFE_PROXIMITY_PENALTY * float(np.clip(ratio, 0.0, 1.0))
+                    if i not in collided_indices:
+                        self._uavs[i].add_proximity_penalty(penalty)
+                    if j not in collided_indices:
+                        self._uavs[j].add_proximity_penalty(penalty)
+
         for i, uav in enumerate(self._uavs):
-            uav.update_position(final_positions[i])
+            uav.update_position(next_positions[i])
 
     def _apply_beam_actions(self, actions: np.ndarray) -> None:
         """Apply beam control actions from the agent.
@@ -372,6 +439,8 @@ class Env:
         for ue in self._ues:
             covering_uavs: list[tuple[UAV, float]] = []
             for uav in self._uavs:
+                if not uav.active:
+                    continue
                 # 使用 3D 距离判断球形覆盖范围
                 distance_3d: float = float(np.linalg.norm(uav.pos - ue.pos))
                 if distance_3d <= config.UAV_COVERAGE_RADIUS:
@@ -410,8 +479,9 @@ class Env:
                     if interferer_idx == serving_uav_idx:
                         continue  # 跳过服务UAV本身
                     
-                    # 无关联UE的UAV不发射，不产生干扰
-                    if len(self._uavs[interferer_idx].current_covered_ues) == 0:
+                    # failed UAV 或无关联UE的 UAV 不发射，不产生干扰
+                    if (not self._uavs[interferer_idx].active or
+                            len(self._uavs[interferer_idx].current_covered_ues) == 0):
                         continue
                     
                     # 计算该干扰UAV对此UE的全频带干扰功率（保守估计）
@@ -464,8 +534,10 @@ class Env:
         rewards: list[float] = [reward] * config.NUM_UAVS
         for uav in self._uavs:
             if uav.collision_violation:
-                rewards[uav.id] -= config.COLLISION_PENALTY
-            if uav.boundary_violation:
+                rewards[uav.id] -= config.COLLISION_FAILURE_PENALTY
+            if uav.active:
+                rewards[uav.id] -= uav.proximity_penalty
+            if uav.active and uav.boundary_violation:
                 rewards[uav.id] -= config.BOUNDARY_PENALTY
         rewards = [r * config.REWARD_SCALING_FACTOR for r in rewards]
         

@@ -67,7 +67,7 @@ class NeighborEmbedding(nn.Module):
 
     def __init__(self, num_files: int = config.NUM_FILES, embed_dim: int = config.ATTENTION_NEIGHBOR_DIM):
         super().__init__()
-        # 邻居特征: pos(3) + cache(NUM_FILES) + immediate_help(1) + complementarity(1)
+        # 邻居特征: pos(3) + cache(NUM_FILES) + immediate_help(1) + complementarity(1) + is_active(1)
         # 分配 embedding 维度：cache 信息最丰富，分配更多维度
         pos_dim = embed_dim // 4       # 16 for embed_dim=64
         cache_dim = embed_dim // 2     # 32 for embed_dim=64
@@ -75,7 +75,7 @@ class NeighborEmbedding(nn.Module):
 
         self.pos_embed = layer_init(nn.Linear(3, pos_dim))
         self.cache_embed = layer_init(nn.Linear(num_files, cache_dim))
-        self.processed_embed = layer_init(nn.Linear(2, processed_dim))
+        self.processed_embed = layer_init(nn.Linear(3, processed_dim))
         self.layer_norm = nn.LayerNorm(embed_dim)
         self.output_dim = embed_dim
 
@@ -85,13 +85,13 @@ class NeighborEmbedding(nn.Module):
             neighbor_features: [batch, num_neighbors, NEIGHBOR_STATE_DIM]
                 - [:, :, :3]: 相对位置
                 - [:, :, 3:3+NUM_FILES]: cache bitmap
-                - [:, :, -2:]: immediate_help, complementarity
+                - [:, :, -3:]: immediate_help, complementarity, is_active
         Returns:
             neighbor_embeddings: [batch, num_neighbors, embed_dim]
         """
         pos = neighbor_features[:, :, :3]
         cache = neighbor_features[:, :, 3:3 + config.NUM_FILES]
-        processed = neighbor_features[:, :, -2:]
+        processed = neighbor_features[:, :, -3:]
 
         pos_emb = F.leaky_relu(self.pos_embed(pos), 0.01)
         cache_emb = F.leaky_relu(self.cache_embed(cache), 0.01)
@@ -106,25 +106,31 @@ class UAVEmbedding(nn.Module):
 
     def __init__(self, num_files: int, embed_dim: int = config.ATTENTION_UAV_EMBED_DIM):
         super().__init__()
-        half_dim = embed_dim // 2  # 32
-        # 位置 embedding (3D -> half_dim)
-        self.pos_embed = layer_init(nn.Linear(3, half_dim))
-        # 缓存 embedding (NUM_FILES -> half_dim)
-        self.cache_embed = layer_init(nn.Linear(num_files, half_dim))
+        pos_dim = embed_dim // 4
+        cache_dim = embed_dim // 2
+        active_dim = embed_dim - pos_dim - cache_dim
+        # 位置 embedding (3D -> pos_dim)
+        self.pos_embed = layer_init(nn.Linear(3, pos_dim))
+        # 缓存 embedding (NUM_FILES -> cache_dim)
+        self.cache_embed = layer_init(nn.Linear(num_files, cache_dim))
+        # 活跃标记 embedding (1D -> active_dim)
+        self.active_embed = layer_init(nn.Linear(1, active_dim))
         self.layer_norm = nn.LayerNorm(embed_dim)
-        self.output_dim = embed_dim  # 32 + 32 = 64
+        self.output_dim = embed_dim
 
-    def forward(self, uav_pos: torch.Tensor, uav_cache: torch.Tensor) -> torch.Tensor:
+    def forward(self, uav_pos: torch.Tensor, uav_cache: torch.Tensor, uav_active: torch.Tensor) -> torch.Tensor:
         """
         Args:
             uav_pos: [batch, 3] 归一化的 UAV 位置
             uav_cache: [batch, NUM_FILES] 缓存位图
+            uav_active: [batch, 1] 活跃标记
         Returns:
             uav_embedding: [batch, embed_dim]
         """
         pos_emb = F.leaky_relu(self.pos_embed(uav_pos), 0.01)
         cache_emb = F.leaky_relu(self.cache_embed(uav_cache), 0.01)
-        uav_emb = torch.cat([pos_emb, cache_emb], dim=-1)
+        active_emb = F.leaky_relu(self.active_embed(uav_active), 0.01)
+        uav_emb = torch.cat([pos_emb, cache_emb, active_emb], dim=-1)
         return self.layer_norm(uav_emb)
 
 
@@ -202,7 +208,7 @@ def parse_observation(obs: torch.Tensor) -> dict:
     解析 flat vector 观测为结构化数据
 
     观测结构：
-    [uav_pos(3), uav_cache(NUM_FILES), neighbor_features(MAX_NEIGHBORS*5),
+    [uav_pos(3), uav_cache(NUM_FILES), uav_is_active(1), neighbor_features(...),
      neighbor_count(1), ue_features(MAX_UES*5), ue_count(1)]
     """
     batch_size = obs.shape[0]
@@ -213,6 +219,8 @@ def parse_observation(obs: torch.Tensor) -> dict:
     idx += 3
     uav_cache = obs[:, idx:idx + config.NUM_FILES]
     idx += config.NUM_FILES
+    uav_active = obs[:, idx:idx + 1]
+    idx += 1
 
     # 邻居特征
     neighbor_flat = obs[:, idx:idx + config.MAX_UAV_NEIGHBORS * config.NEIGHBOR_STATE_DIM]
@@ -241,6 +249,7 @@ def parse_observation(obs: torch.Tensor) -> dict:
     return {
         'uav_pos': uav_pos,
         'uav_cache': uav_cache,
+        'uav_active': uav_active,
         'neighbor_features': neighbor_features,
         'neighbor_mask': neighbor_mask,
         'ue_features': ue_features,
@@ -299,7 +308,7 @@ class AttentionEncoder(nn.Module):
         parsed = parse_observation(obs)
 
         # UAV embedding
-        uav_emb = self.uav_embed(parsed['uav_pos'], parsed['uav_cache'])
+        uav_emb = self.uav_embed(parsed['uav_pos'], parsed['uav_cache'], parsed['uav_active'])
 
         # UE attention
         ue_emb = self.ue_embed(parsed['ue_features'])
