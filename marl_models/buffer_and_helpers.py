@@ -42,6 +42,7 @@ class RolloutBuffer:
         self.states: np.ndarray = np.zeros((buffer_size, state_dim), dtype=np.float32)
         self.observations: np.ndarray = np.zeros((buffer_size, num_agents, obs_dim), dtype=np.float32)
         self.actions: np.ndarray = np.zeros((buffer_size, num_agents, action_dim), dtype=np.float32)
+        self.pre_tanh_actions: np.ndarray = np.zeros((buffer_size, num_agents, action_dim), dtype=np.float32)
         self.log_probs: np.ndarray = np.zeros((buffer_size, num_agents), dtype=np.float32)
         self.rewards: np.ndarray = np.zeros((buffer_size, num_agents), dtype=np.float32)
         self.dones: np.ndarray = np.zeros((buffer_size, num_agents), dtype=np.float32)
@@ -53,13 +54,24 @@ class RolloutBuffer:
 
         self.step: int = 0
 
-    def add(self, state: np.ndarray, obs: np.ndarray, actions: np.ndarray, log_probs: np.ndarray, rewards: list[float], done: bool, values: np.ndarray) -> None:
+    def add(
+        self,
+        state: np.ndarray,
+        obs: np.ndarray,
+        actions: np.ndarray,
+        pre_tanh_actions: np.ndarray,
+        log_probs: np.ndarray,
+        rewards: list[float],
+        done: bool,
+        values: np.ndarray,
+    ) -> None:
         if self.step >= self.buffer_size:
             raise ValueError("Rollout buffer overflow")
         dones: np.ndarray = np.array([done] * config.NUM_UAVS)
         self.states[self.step] = state
         self.observations[self.step] = obs
         self.actions[self.step] = actions
+        self.pre_tanh_actions[self.step] = pre_tanh_actions
         self.log_probs[self.step] = log_probs
         self.rewards[self.step] = np.array(rewards)
         self.dones[self.step] = dones
@@ -88,6 +100,7 @@ class RolloutBuffer:
         states: np.ndarray = np.repeat(self.states, self.num_agents, axis=0)
         obs: np.ndarray = self.observations.reshape(-1, self.obs_dim)
         actions: np.ndarray = self.actions.reshape(-1, self.action_dim)  # Reshape to (N, action_dim)
+        pre_tanh_actions: np.ndarray = self.pre_tanh_actions.reshape(-1, self.action_dim)
         log_probs: np.ndarray = self.log_probs.reshape(-1)
         advantages: np.ndarray = self.advantages.reshape(-1)
         returns: np.ndarray = self.returns.reshape(-1)
@@ -103,6 +116,7 @@ class RolloutBuffer:
         states_tensor: torch.Tensor = torch.from_numpy(states).to(self.device, non_blocking=True)
         obs_tensor: torch.Tensor = torch.from_numpy(obs).to(self.device, non_blocking=True)
         actions_tensor: torch.Tensor = torch.from_numpy(actions).to(self.device, non_blocking=True)
+        pre_tanh_actions_tensor: torch.Tensor = torch.from_numpy(pre_tanh_actions).to(self.device, non_blocking=True)
         log_probs_tensor: torch.Tensor = torch.from_numpy(log_probs).to(self.device, non_blocking=True)
         advantages_tensor: torch.Tensor = torch.from_numpy(advantages).to(self.device, non_blocking=True)
         returns_tensor: torch.Tensor = torch.from_numpy(returns).to(self.device, non_blocking=True)
@@ -118,6 +132,7 @@ class RolloutBuffer:
                 "states": states_tensor[batch_idx_tensor],
                 "obs": obs_tensor[batch_idx_tensor],
                 "actions": actions_tensor[batch_idx_tensor],
+                "pre_tanh_actions": pre_tanh_actions_tensor[batch_idx_tensor],
                 "old_log_probs": log_probs_tensor[batch_idx_tensor],
                 "advantages": advantages_tensor[batch_idx_tensor],
                 "returns": returns_tensor[batch_idx_tensor],

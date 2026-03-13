@@ -343,7 +343,8 @@ class Env:
         next_positions: np.ndarray = current_positions.copy()
         move_times: np.ndarray = np.zeros(config.NUM_UAVS, dtype=np.float64)
         max_dist: float = config.UAV_SPEED * config.TIME_SLOT_DURATION
-        min_boundary_gap: float = config.UAV_COVERAGE_RADIUS / 2.0
+        x_min, y_min = 0.0, 0.0
+        x_max, y_max = float(config.AREA_WIDTH), float(config.AREA_HEIGHT)
         active_indices: list[int] = [i for i, uav in enumerate(self._uavs) if uav.active]
 
         if active_indices:
@@ -359,16 +360,16 @@ class Env:
 
             for local_idx, uav_idx in enumerate(active_indices):
                 proposed = proposed_positions[local_idx]
-                in_xy_bounds = (min_boundary_gap <= proposed[0] <= config.AREA_WIDTH - min_boundary_gap and
-                                min_boundary_gap <= proposed[1] <= config.AREA_HEIGHT - min_boundary_gap)
+                in_xy_bounds = (x_min <= proposed[0] <= x_max and
+                                y_min <= proposed[1] <= y_max)
                 in_z_bounds = config.UAV_MIN_ALT <= proposed[2] <= config.UAV_MAX_ALT
                 if not (in_xy_bounds and in_z_bounds):
                     self._uavs[uav_idx].boundary_violation = True
 
             next_positions[active_indices] = np.clip(
                 proposed_positions,
-                [min_boundary_gap, min_boundary_gap, config.UAV_MIN_ALT],
-                [config.AREA_WIDTH - min_boundary_gap, config.AREA_HEIGHT - min_boundary_gap, config.UAV_MAX_ALT]
+                [x_min, y_min, config.UAV_MIN_ALT],
+                [x_max, y_max, config.UAV_MAX_ALT]
             )
             actual_distances = np.linalg.norm(next_positions[active_indices] - current_positions[active_indices], axis=1)
             move_times[active_indices] = actual_distances / (config.UAV_SPEED + float(config.EPSILON))

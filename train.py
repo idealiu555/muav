@@ -50,8 +50,7 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
                 plot_snapshot(env, update, step, logger.log_dir, "update", logger.timestamp)
 
             obs_arr: np.ndarray = np.array(obs)
-            raw_actions, log_probs, values = model.get_action_and_value(obs_arr, state)
-            actions: np.ndarray = np.clip(raw_actions, -1.0, 1.0)
+            actions, log_probs, values, pre_tanh_actions = model.get_action_and_value(obs_arr, state)
             
             # Action statistics
             action_accumulator.append(actions.flatten())
@@ -63,8 +62,7 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
             # We want to bootstrap from the next state's value.
             # Only use done=True if the episode terminated due to failure/completion, not timeout.
             done: bool = False 
-            # Store raw actions so PPO log_prob computation remains consistent
-            buffer.add(state, obs_arr, raw_actions, log_probs, rewards, done, values)
+            buffer.add(state, obs_arr, actions, pre_tanh_actions, log_probs, rewards, done, values)
 
             obs = next_obs
             state = next_state
@@ -84,7 +82,7 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
                 training_stats_accumulator[key].append(value)
 
         with torch.no_grad():
-            _, _, last_values = model.get_action_and_value(np.array(obs), state)
+            _, _, last_values, _ = model.get_action_and_value(np.array(obs), state)
 
         buffer.compute_returns_and_advantages(last_values, config.DISCOUNT_FACTOR, config.PPO_GAE_LAMBDA)
 

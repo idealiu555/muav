@@ -21,9 +21,9 @@ class MARLModel(ABC):
         self.action_dim = action_dim
         self.device = device
 
-    def get_action_and_value(self, obs: np.ndarray, state: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def get_action_and_value(self, obs: np.ndarray, state: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
-        Gets actions, log probabilities, and state values.
+        Gets actions, log probabilities, state values, and pre-tanh actions.
         Essential for on-policy algorithms like PPO.
         """
         raise NotImplementedError("This method is required for on-policy algorithms.")

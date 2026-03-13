@@ -20,6 +20,14 @@ class MAPPO(MARLModel):
         self.actor_optimizer: torch.optim.AdamW = torch.optim.AdamW(self.actors.parameters(), lr=config.ACTOR_LR)
         self.critic_optimizer: torch.optim.AdamW = torch.optim.AdamW(self.critics.parameters(), lr=config.CRITIC_LR)
 
+    @staticmethod
+    def _squash_action_and_log_prob(dist: Normal, pre_tanh_action: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        squashed_action: torch.Tensor = torch.tanh(pre_tanh_action)
+        log_probs: torch.Tensor = dist.log_prob(pre_tanh_action)
+        log_probs -= torch.log(1 - squashed_action.pow(2) + config.EPSILON)
+        log_probs = log_probs.sum(dim=-1)
+        return squashed_action, log_probs
+
     def select_actions(self, observations: list[np.ndarray], exploration: bool) -> np.ndarray:
         # Convert observations to tensor once (avoid repeated conversions)
         obs_array: np.ndarray = np.array(observations, dtype=np.float32)
@@ -27,36 +35,34 @@ class MAPPO(MARLModel):
         with torch.no_grad():
             dist: Normal = self.actors(obs_tensor)
             if exploration:
-                actions: torch.Tensor = dist.sample()  # Stochastic actions for exploration
+                pre_tanh_actions: torch.Tensor = dist.sample()
             else:
-                actions = dist.mean  # Deterministic actions for evaluation
-            # Clip on GPU before transferring to CPU
-            actions = torch.clamp(actions, -1.0, 1.0)
+                pre_tanh_actions = dist.mean
+            actions: torch.Tensor = torch.tanh(pre_tanh_actions)
 
         return actions.cpu().numpy()
 
-    def get_action_and_value(self, obs: np.ndarray, state: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Sample raw actions for PPO; caller is responsible for clipping before env step."""
+    def get_action_and_value(self, obs: np.ndarray, state: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Sample bounded actions and corrected log-probs for PPO."""
         # Use non_blocking for async data transfer
         obs_tensor: torch.Tensor = torch.from_numpy(obs.astype(np.float32)).to(self.device, non_blocking=True)
         state_tensor: torch.Tensor = torch.from_numpy(state.astype(np.float32)).to(self.device, non_blocking=True)
 
         with torch.no_grad():
             dist: Normal = self.actors(obs_tensor)
-            raw_actions: torch.Tensor = dist.sample()
-            # PPO log_prob must correspond to the raw (unclipped) actions
-            log_probs: torch.Tensor = dist.log_prob(raw_actions).sum(dim=-1)
+            pre_tanh_actions: torch.Tensor = dist.sample()
+            actions, log_probs = self._squash_action_and_log_prob(dist, pre_tanh_actions)
 
             if state_tensor.dim() == 1:
                 state_tensor = state_tensor.unsqueeze(0)
             values: torch.Tensor = self.critics(state_tensor).squeeze(0)
 
-        return raw_actions.cpu().numpy(), log_probs.cpu().numpy(), values.cpu().numpy()
+        return actions.cpu().numpy(), log_probs.cpu().numpy(), values.cpu().numpy(), pre_tanh_actions.cpu().numpy()
 
     def update(self, batch: ExperienceBatch) -> dict:
         assert isinstance(batch, dict), "MAPPO expects OnPolicyExperienceBatch (dict)"
         obs_batch: torch.Tensor = batch["obs"]
-        actions_batch: torch.Tensor = batch["actions"]
+        pre_tanh_actions_batch: torch.Tensor = batch["pre_tanh_actions"]
         old_log_probs_batch: torch.Tensor = batch["old_log_probs"]
         advantages_batch: torch.Tensor = batch["advantages"]
         returns_batch: torch.Tensor = batch["returns"]
@@ -83,7 +89,7 @@ class MAPPO(MARLModel):
 
         # Actor Loss
         dist: Normal = self.actors(obs_batch)
-        new_log_probs: torch.Tensor = dist.log_prob(actions_batch).sum(dim=-1)
+        _, new_log_probs = self._squash_action_and_log_prob(dist, pre_tanh_actions_batch)
         ratio: torch.Tensor = torch.exp(new_log_probs - old_log_probs_batch)
 
         # PPO surrogate loss
@@ -91,8 +97,10 @@ class MAPPO(MARLModel):
         surr2: torch.Tensor = torch.clamp(ratio, 1.0 - config.PPO_CLIP_EPS, 1.0 + config.PPO_CLIP_EPS) * advantages_batch
         actor_loss: torch.Tensor = -torch.min(surr1, surr2).mean()
 
-        # Adding entropy bonus for exploration
-        entropy: torch.Tensor = dist.entropy().mean()
+        # Entropy bonus under tanh-squashed policy (Monte Carlo estimate)
+        entropy_pre_tanh: torch.Tensor = dist.rsample()
+        _, entropy_log_probs = self._squash_action_and_log_prob(dist, entropy_pre_tanh)
+        entropy: torch.Tensor = (-entropy_log_probs).mean()
         actor_loss -= config.PPO_ENTROPY_COEF * entropy
 
         # Combined update: zero gradients once, compute both losses, then step

@@ -76,29 +76,32 @@ class MASAC(MARLModel):
         alphas: list[float] = []
         q_values: list[float] = []
 
+        alpha_tensors: list[torch.Tensor] = [log_alpha.exp() for log_alpha in self.log_alphas]
+        alphas = [alpha.item() for alpha in alpha_tensors]
+
+        with torch.no_grad():
+            # Shared target actions/log_probs computed once for efficiency
+            next_actions_list: list[torch.Tensor] = []
+            next_log_probs_list: list[torch.Tensor] = []
+            for i in range(self.num_agents):
+                next_action, next_log_prob = self.actors[i].sample(next_obs_tensor[:, i, :])
+                next_actions_list.append(next_action)
+                next_log_probs_list.append(next_log_prob)
+
+            next_actions_tensor: torch.Tensor = torch.cat(next_actions_list, dim=1)
+
         for agent_idx in range(self.num_agents):
-            alpha: torch.Tensor = self.log_alphas[agent_idx].exp()
-            alphas.append(alpha.item())
+            alpha: torch.Tensor = alpha_tensors[agent_idx]
 
             # Update Critic
             with torch.no_grad():
-                # Get next actions and log probs for all agents
-                next_actions_list: list[torch.Tensor] = []
-                next_log_probs_list: list[torch.Tensor] = []
-                for i in range(self.num_agents):
-                    next_action, next_log_prob = self.actors[i].sample(next_obs_tensor[:, i, :])
-                    next_actions_list.append(next_action)
-                    next_log_probs_list.append(next_log_prob)
-
-                next_actions_tensor: torch.Tensor = torch.cat(next_actions_list, dim=1)
-                agent_next_log_prob: torch.Tensor = next_log_probs_list[agent_idx]
-
                 # Get target Q values from the minimum of the two target critics
                 target_q1: torch.Tensor = self.target_critics_1[agent_idx](next_obs_flat, next_actions_tensor)
                 target_q2: torch.Tensor = self.target_critics_2[agent_idx](next_obs_flat, next_actions_tensor)
                 min_target_q: torch.Tensor = torch.min(target_q1, target_q2)
 
-                # Add the entropy term to the target
+                # Agent-wise maximum-entropy target (consistent with actor/alpha updates)
+                agent_next_log_prob: torch.Tensor = next_log_probs_list[agent_idx]
                 target_q: torch.Tensor = min_target_q - alpha * agent_next_log_prob
 
                 agent_reward: torch.Tensor = rewards_tensor[:, agent_idx].unsqueeze(1)
