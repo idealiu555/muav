@@ -4,6 +4,7 @@ import config
 import numpy as np
 import os
 import torch
+import torch.nn.functional as F
 from torch.distributions import Normal
 
 
@@ -23,8 +24,10 @@ class MAPPO(MARLModel):
     @staticmethod
     def _squash_action_and_log_prob(dist: Normal, pre_tanh_action: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         squashed_action: torch.Tensor = torch.tanh(pre_tanh_action)
-        log_probs: torch.Tensor = dist.log_prob(pre_tanh_action)
-        log_probs -= torch.log(1 - squashed_action.pow(2) + config.EPSILON)
+        # Stable tanh log-det-Jacobian:
+        # log(1 - tanh(x)^2) = 2 * (log(2) - x - softplus(-2x))
+        log_det_jacobian: torch.Tensor = 2.0 * (np.log(2.0) - pre_tanh_action - F.softplus(-2.0 * pre_tanh_action))
+        log_probs: torch.Tensor = dist.log_prob(pre_tanh_action) - log_det_jacobian
         log_probs = log_probs.sum(dim=-1)
         return squashed_action, log_probs
 
@@ -90,17 +93,25 @@ class MAPPO(MARLModel):
         # Actor Loss
         dist: Normal = self.actors(obs_batch)
         _, new_log_probs = self._squash_action_and_log_prob(dist, pre_tanh_actions_batch)
-        ratio: torch.Tensor = torch.exp(new_log_probs - old_log_probs_batch)
+        log_ratio: torch.Tensor = torch.clamp(
+            new_log_probs - old_log_probs_batch,
+            -config.PPO_MAX_LOG_RATIO,
+            config.PPO_MAX_LOG_RATIO,
+        )
+        ratio: torch.Tensor = torch.exp(log_ratio)
 
         # PPO surrogate loss
         surr1: torch.Tensor = ratio * advantages_batch
         surr2: torch.Tensor = torch.clamp(ratio, 1.0 - config.PPO_CLIP_EPS, 1.0 + config.PPO_CLIP_EPS) * advantages_batch
         actor_loss: torch.Tensor = -torch.min(surr1, surr2).mean()
 
-        # Entropy bonus under tanh-squashed policy (Monte Carlo estimate)
-        entropy_pre_tanh: torch.Tensor = dist.rsample()
-        _, entropy_log_probs = self._squash_action_and_log_prob(dist, entropy_pre_tanh)
-        entropy: torch.Tensor = (-entropy_log_probs).mean()
+        # Use pre-tanh entropy by default for lower-variance PPO updates.
+        if config.PPO_USE_SQUASHED_ENTROPY:
+            entropy_pre_tanh: torch.Tensor = dist.rsample()
+            _, entropy_log_probs = self._squash_action_and_log_prob(dist, entropy_pre_tanh)
+            entropy: torch.Tensor = (-entropy_log_probs).mean()
+        else:
+            entropy = dist.entropy().sum(dim=-1).mean()
         actor_loss -= config.PPO_ENTROPY_COEF * entropy
 
         # Combined update: zero gradients once, compute both losses, then step
@@ -122,6 +133,8 @@ class MAPPO(MARLModel):
             "critic_loss": critic_loss.item(),
             "entropy": entropy.item(),
             "ratio_mean": ratio.mean().item(),
+            "approx_kl": (old_log_probs_batch - new_log_probs).abs().mean().item(),
+            "clip_fraction": (torch.abs(ratio - 1.0) > config.PPO_CLIP_EPS).float().mean().item(),
             "actor_grad_norm": float(actor_grad_norm),
             "critic_grad_norm": float(critic_grad_norm),
             "value_mean": values.mean().item(),
