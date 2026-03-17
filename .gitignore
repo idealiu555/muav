@@ -14,3 +14,4 @@ saved_models/
 *.txt
 *.json
 AGENTS.md
+log/

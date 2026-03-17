@@ -317,22 +317,16 @@ class Env:
             ue_count = np.array([actual_ue_count], dtype=np.float32)
 
             # Part 4: Combine all parts
-            # 注意力模式: [own_state, neighbor_states, neighbor_count, ue_states, ue_count]
-            # MLP模式: [own_state, neighbor_states, ue_states]
-            if config.USE_ATTENTION:
-                obs: np.ndarray = np.concatenate([
-                    own_state,
-                    neighbor_states.flatten(),
-                    neighbor_count,
-                    ue_states.flatten(),
-                    ue_count
-                ])
-            else:
-                obs = np.concatenate([
-                    own_state,
-                    neighbor_states.flatten(),
-                    ue_states.flatten()
-                ])
+            # 统一观测结构: [own_state, neighbor_states, neighbor_count, ue_states, ue_count]
+            # - attention 模式使用 count 生成 mask
+            # - 无 attention 模式使用 count 做均值池化，避免 padding 污染
+            obs: np.ndarray = np.concatenate([
+                own_state,
+                neighbor_states.flatten(),
+                neighbor_count,
+                ue_states.flatten(),
+                ue_count
+            ])
             all_obs.append(obs)
 
         return all_obs

@@ -135,15 +135,15 @@ OWN_STATE_DIM: int = 3 + NUM_FILES + 1
 # Neighbor state: pos(3) + cache(NUM_FILES) + immediate_help(1) + complementarity(1) + is_active(1)
 # 混合方案：保留原始cache bitmap + 预处理特征 + 活跃标记
 NEIGHBOR_STATE_DIM: int = 3 + NUM_FILES + 3  # 26 dims
-# 观测维度计算（根据是否使用注意力机制）
+# 观测维度计算（统一包含 count 字段）
 # - 基础部分: uav_state + neighbors + ues
-# - 注意力模式额外: neighbor_count(1) + ue_count(1) 用于生成 mask
+# - 额外字段: neighbor_count(1) + ue_count(1)，用于 attention mask 或无 attention 的均值池化
 # OBS_DIM: 24+4*26+1+50*5+1 = 380
 # 编码器输出维度：UAV(64) + UE_attn(128) + Neighbor_attn(64) = 256 ≈ OBS_DIM(380)
 _OBS_BASE_DIM: int = (OWN_STATE_DIM +
                       MAX_UAV_NEIGHBORS * NEIGHBOR_STATE_DIM +
                       MAX_ASSOCIATED_UES * UE_STATE_DIM)
-OBS_DIM_SINGLE: int = _OBS_BASE_DIM + 2 if USE_ATTENTION else _OBS_BASE_DIM
+OBS_DIM_SINGLE: int = _OBS_BASE_DIM + 2
 
 
 ACTION_DIM: int = 5 if BEAM_CONTROL_ENABLED else 3  # [dx, dy, dz] 或 [dx, dy, dz, beam_theta, beam_phi]

@@ -1,15 +1,17 @@
 from marl_models.base_model import MARLModel, ExperienceBatch
-from marl_models.maddpg.agents import ActorNetwork, CriticNetwork
+from marl_models.maddpg.agents import (
+    ActorNetwork,
+    CriticNetwork,
+    ActorNetworkWithAttention,
+    CriticNetworkWithAttention,
+)
 from marl_models.buffer_and_helpers import soft_update, GaussianNoise
+from marl_models.attention import AttentionEncoder
 import config
 import torch
 import torch.nn.functional as F
 import numpy as np
 import os
-
-# 条件导入注意力网络
-if config.USE_ATTENTION:
-    from marl_models.maddpg.agents import ActorNetworkWithAttention, CriticNetworkWithAttention
 
 
 class MADDPG(MARLModel):
@@ -21,7 +23,6 @@ class MADDPG(MARLModel):
         # Create networks for each agent (根据配置选择网络类型)
         if config.USE_ATTENTION:
             # 创建真正的单一共享编码器（所有 agent 共用，支持扩展）
-            from marl_models.attention import AttentionEncoder
             self.shared_encoder = AttentionEncoder().to(device)
             self.target_shared_encoder = AttentionEncoder().to(device)
             
@@ -33,9 +34,9 @@ class MADDPG(MARLModel):
         else:
             # 使用原始 MLP 网络
             self.actors = [ActorNetwork(obs_dim, action_dim).to(device) for _ in range(num_agents)]
-            self.critics = [CriticNetwork(self.total_obs_dim, self.total_action_dim).to(device) for _ in range(num_agents)]
+            self.critics = [CriticNetwork(num_agents, obs_dim, action_dim).to(device) for _ in range(num_agents)]
             self.target_actors = [ActorNetwork(obs_dim, action_dim).to(device) for _ in range(num_agents)]
-            self.target_critics = [CriticNetwork(self.total_obs_dim, self.total_action_dim).to(device) for _ in range(num_agents)]
+            self.target_critics = [CriticNetwork(num_agents, obs_dim, action_dim).to(device) for _ in range(num_agents)]
         self._init_target_networks()
 
         # Create optimizers
@@ -89,11 +90,9 @@ class MADDPG(MARLModel):
         total_critic_grad_norm: float = 0.0
         q_values: list[float] = []
         
-        # Pre-compute encodings for attention networks OUTSIDE no_grad (需要梯度流)
-        if config.USE_ATTENTION:
-            joint_encoded = self.critics[0].encode_observations(obs_flat)
-        else:
-            joint_encoded = None
+        # Pre-compute critic-side observation encodings once per batch.
+        # This is used by both attention and no-attention critics.
+        joint_encoded = self.critics[0].encode_observations(obs_flat)
         
         # Pre-compute all actions once (without gradients) for efficiency
         # This reduces actor forward passes from O(N²) to O(2N)
@@ -103,11 +102,8 @@ class MADDPG(MARLModel):
             next_actions: list[torch.Tensor] = [self.target_actors[i](next_obs_tensor[:, i, :]) for i in range(self.num_agents)]
             next_actions_tensor: torch.Tensor = torch.cat(next_actions, dim=1)
             
-            # Pre-compute target encodings (不需要梯度)
-            if config.USE_ATTENTION:
-                target_joint_encoded = self.target_critics[0].encode_observations(next_obs_flat)
-            else:
-                target_joint_encoded = None
+            # Target-side encodings do not need gradients
+            target_joint_encoded = self.target_critics[0].encode_observations(next_obs_flat)
 
         # Zero gradients for shared encoder (if using attention)
         if config.USE_ATTENTION:
@@ -160,8 +156,8 @@ class MADDPG(MARLModel):
             pred_actions_tensor: torch.Tensor = torch.stack(current_joint_actions, dim=1)
             pred_actions_flat: torch.Tensor = pred_actions_tensor.reshape(batch_size, -1)
 
-            # Detach joint_encoded to prevent actor from modifying critic's state representation
-            actor_joint_encoded = joint_encoded.detach() if config.USE_ATTENTION else joint_encoded
+            # Detach critic-side encodings to prevent actor update from affecting critic representation.
+            actor_joint_encoded = joint_encoded.detach()
             actor_loss: torch.Tensor = -self.critics[agent_idx](obs_flat, pred_actions_flat, actor_joint_encoded).mean()
             self.actor_optimizers[agent_idx].zero_grad(set_to_none=True)
             # No need to retain graph: each actor's computation graph is independent
@@ -262,94 +258,37 @@ class MADDPG(MARLModel):
                 os.path.join(directory, f"agent_{i}.pth"),
             )
 
-    def load(self, directory: str, allow_partial: bool = True) -> None:
-        """
-        加载模型权重，支持部分继承以实现 agent 数量扩展。
-        
-        Args:
-            directory: 模型保存目录
-            allow_partial: 是否允许部分继承（当保存的 agent 数量与当前模型不同时）
-                - 如果当前模型 agent 数 > 保存的 agent 数，多余的 agent 从 agent_0 复制权重
-                - 如果当前模型 agent 数 < 保存的 agent 数，只加载前 N 个 agent
-        """
+    def load(self, directory: str) -> None:
         if not os.path.exists(directory):
             raise FileNotFoundError(f"❌ Model directory not found: {directory}")
 
-        # 1. 检测保存的 agent 数量
-        saved_agent_count = 0
-        while os.path.exists(os.path.join(directory, f"agent_{saved_agent_count}.pth")):
-            saved_agent_count += 1
-        
-        if saved_agent_count == 0:
-            raise FileNotFoundError(f"❌ No agent files found in: {directory}")
-        
-        # 检查兼容性
-        if saved_agent_count != self.num_agents:
-            if not allow_partial:
-                raise ValueError(
-                    f"❌ Agent count mismatch: saved={saved_agent_count}, current={self.num_agents}. "
-                    f"Set allow_partial=True to enable partial inheritance."
-                )
-            print(f"⚠️  Agent count mismatch: saved={saved_agent_count}, current={self.num_agents}")
-            print(f"   Using partial inheritance: extra agents will copy from agent_0")
-
-        # 2. Load shared encoder (if using attention)
         if config.USE_ATTENTION:
             encoder_path = os.path.join(directory, "shared_encoder.pth")
-            if os.path.exists(encoder_path):
-                encoder_checkpoint = torch.load(encoder_path, map_location=self.device)
-                self.shared_encoder.load_state_dict(encoder_checkpoint["encoder"])
-                self.target_shared_encoder.load_state_dict(encoder_checkpoint["target_encoder"])
-                self.shared_encoder_optimizer.load_state_dict(encoder_checkpoint["encoder_optimizer"])
-            else:
-                # 向后兼容：尝试加载旧的多编码器格式（取第一个编码器）
-                old_encoder_path = os.path.join(directory, "shared_encoders.pth")
-                if os.path.exists(old_encoder_path):
-                    encoder_checkpoint = torch.load(old_encoder_path, map_location=self.device)
-                    self.shared_encoder.load_state_dict(encoder_checkpoint["encoder_0"])
-                    self.target_shared_encoder.load_state_dict(encoder_checkpoint["target_encoder_0"])
-                    self.shared_encoder_optimizer.load_state_dict(encoder_checkpoint["encoder_optimizer_0"])
+            if not os.path.exists(encoder_path):
+                raise FileNotFoundError(f"❌ Shared encoder file not found: {encoder_path}")
+            encoder_checkpoint = torch.load(encoder_path, map_location=self.device)
+            self.shared_encoder.load_state_dict(encoder_checkpoint["encoder"])
+            self.target_shared_encoder.load_state_dict(encoder_checkpoint["target_encoder"])
+            self.shared_encoder_optimizer.load_state_dict(encoder_checkpoint["encoder_optimizer"])
 
-        # 3. 加载 agent 权重
-        # 先加载 agent_0 作为模板（用于扩展时复制）
-        template_checkpoint = None
-        if self.num_agents > saved_agent_count:
-            template_path = os.path.join(directory, "agent_0.pth")
-            template_checkpoint = torch.load(template_path, map_location=self.device)
-        
         for i in range(self.num_agents):
-            if i < saved_agent_count:
-                # 正常加载已保存的 agent
-                agent_path: str = os.path.join(directory, f"agent_{i}.pth")
-                checkpoint: dict = torch.load(agent_path, map_location=self.device)
-            else:
-                # 从模板 agent_0 复制权重
-                checkpoint = template_checkpoint
-                print(f"   Agent {i}: copying weights from agent_0 (template)")
-            
+            agent_path: str = os.path.join(directory, f"agent_{i}.pth")
+            if not os.path.exists(agent_path):
+                raise FileNotFoundError(f"❌ Model file not found: {agent_path}")
+            checkpoint: dict = torch.load(agent_path, map_location=self.device)
+
             self.actors[i].load_state_dict(checkpoint["actor"])
-            # Filter out encoders from old checkpoints to prevent overwriting shared encoders
             if config.USE_ATTENTION:
-                critic_state = {k: v for k, v in checkpoint["critic"].items() if not k.startswith('encoder.')}
-                target_critic_state = {k: v for k, v in checkpoint["target_critic"].items() if not k.startswith('encoder.')}
+                critic_state = {k: v for k, v in checkpoint["critic"].items() if not k.startswith("encoder.")}
+                target_critic_state = {k: v for k, v in checkpoint["target_critic"].items() if not k.startswith("encoder.")}
                 self.critics[i].load_state_dict(critic_state, strict=False)
                 self.target_critics[i].load_state_dict(target_critic_state, strict=False)
             else:
                 self.critics[i].load_state_dict(checkpoint["critic"])
                 self.target_critics[i].load_state_dict(checkpoint["target_critic"])
-            
-            # Optimizer 只在完全匹配时恢复，扩展时使用新初始化的 optimizer
-            if i < saved_agent_count:
-                self.actor_optimizers[i].load_state_dict(checkpoint["actor_optimizer"])
-                self.critic_optimizers[i].load_state_dict(checkpoint["critic_optimizer"])
-            
-            # Restore noise scale (backward compatible: use default if not present)
+
+            self.actor_optimizers[i].load_state_dict(checkpoint["actor_optimizer"])
+            self.critic_optimizers[i].load_state_dict(checkpoint["critic_optimizer"])
+
             if "noise_scale" in checkpoint:
                 self.noise[i].scale = checkpoint["noise_scale"]
-        
-        # 打印加载信息
-        if saved_agent_count == self.num_agents:
-            print(f"✅ Loaded {self.num_agents} agents from {directory}")
-        else:
-            print(f"✅ Loaded {min(saved_agent_count, self.num_agents)} agents, "
-                  f"initialized {max(0, self.num_agents - saved_agent_count)} from template")

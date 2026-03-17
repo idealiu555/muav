@@ -211,6 +211,17 @@ def parse_observation(obs: torch.Tensor) -> dict:
     [uav_pos(3), uav_cache(NUM_FILES), uav_is_active(1), neighbor_features(...),
      neighbor_count(1), ue_features(MAX_UES*5), ue_count(1)]
     """
+    expected_obs_dim = (config.OWN_STATE_DIM +
+                        config.MAX_UAV_NEIGHBORS * config.NEIGHBOR_STATE_DIM +
+                        1 +
+                        config.MAX_ASSOCIATED_UES * config.UE_STATE_DIM +
+                        1)
+    if obs.shape[1] != expected_obs_dim:
+        raise ValueError(
+            f"Unexpected observation dim: got {obs.shape[1]}, expected {expected_obs_dim}. "
+            "Please ensure env observation structure and config dimensions are aligned."
+        )
+
     batch_size = obs.shape[0]
     idx = 0
 
@@ -269,7 +280,7 @@ class AttentionEncoder(nn.Module):
     5. 拼接 -> [batch, 256]
 
     设计原则：
-    - 输入维度 295，输出维度 256（轻微压缩）
+    - 输入维度 380，输出维度 256（轻微压缩）
     - UE attention: heads=2, head_dim=64（符合最佳实践）
     - Neighbor attention: heads=2, head_dim=32（符合最佳实践）
     - UE 维度较大（50个UE，信息量最大）
@@ -320,6 +331,47 @@ class AttentionEncoder(nn.Module):
 
         # 拼接所有特征
         return torch.cat([uav_emb, ue_attn, neighbor_attn], dim=-1)
+
+
+class MeanPoolingEncoder(nn.Module):
+    """
+    无 attention 分支的轻量编码器。
+
+    使用 count/mask 对邻居和 UE 特征做均值池化（统一权重），
+    避免 padding 0 对 MLP 输入造成语义污染。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.output_dim = config.OWN_STATE_DIM + config.NEIGHBOR_STATE_DIM + config.UE_STATE_DIM + 2
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        parsed = parse_observation(obs)
+
+        own_state = torch.cat(
+            [parsed["uav_pos"], parsed["uav_cache"], parsed["uav_active"]],
+            dim=-1,
+        )
+
+        neighbor_mask = parsed["neighbor_mask"].unsqueeze(-1)
+        neighbor_sum = (parsed["neighbor_features"] * neighbor_mask).sum(dim=1)
+        neighbor_count = neighbor_mask.sum(dim=1)
+        neighbor_denom = neighbor_count.clamp_min(1.0)
+        neighbor_mean = neighbor_sum / neighbor_denom
+
+        ue_mask = parsed["ue_mask"].unsqueeze(-1)
+        ue_sum = (parsed["ue_features"] * ue_mask).sum(dim=1)
+        ue_count = ue_mask.sum(dim=1)
+        ue_denom = ue_count.clamp_min(1.0)
+        ue_mean = ue_sum / ue_denom
+
+        neighbor_count_norm = neighbor_count / float(config.MAX_UAV_NEIGHBORS)
+        ue_count_norm = ue_count / float(config.MAX_ASSOCIATED_UES)
+
+        return torch.cat(
+            [own_state, neighbor_mean, ue_mean, neighbor_count_norm, ue_count_norm],
+            dim=-1,
+        )
 
 
 class AgentPoolingAttention(nn.Module):
