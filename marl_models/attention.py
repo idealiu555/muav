@@ -142,7 +142,7 @@ class CrossAttention(nn.Module):
     K, V 来自 UE 特征，表示"每个 UE 的关键信息和内容"
     """
 
-    def __init__(self, query_dim: int, kv_dim: int, num_heads: int = 4, dropout: float = 0.1):
+    def __init__(self, query_dim: int, kv_dim: int, num_heads: int = 4):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = kv_dim // num_heads
@@ -154,7 +154,6 @@ class CrossAttention(nn.Module):
         self.v_proj = layer_init(nn.Linear(kv_dim, kv_dim))
         self.out_proj = layer_init(nn.Linear(kv_dim, kv_dim))
 
-        self.dropout = nn.Dropout(dropout)
         self.scale = self.head_dim ** -0.5
         self.output_dim = kv_dim
 
@@ -193,7 +192,6 @@ class CrossAttention(nn.Module):
         attn_weights = F.softmax(attn_scores, dim=-1)
         # 处理全 mask 的情况（避免 nan）
         attn_weights = torch.nan_to_num(attn_weights, nan=0.0)
-        attn_weights = self.dropout(attn_weights)
 
         # 加权聚合 V
         output = torch.matmul(attn_weights, V)  # [batch, num_heads, 1, head_dim]
@@ -290,8 +288,7 @@ class AttentionEncoder(nn.Module):
                  ue_embed_dim: int = config.ATTENTION_EMBED_DIM,
                  uav_embed_dim: int = config.ATTENTION_UAV_EMBED_DIM,
                  neighbor_out_dim: int = config.ATTENTION_NEIGHBOR_DIM,
-                 num_heads: int = config.ATTENTION_NUM_HEADS,
-                 dropout: float = config.ATTENTION_DROPOUT):
+                 num_heads: int = config.ATTENTION_NUM_HEADS):
         super().__init__()
 
         # Embedding 模块
@@ -301,9 +298,9 @@ class AttentionEncoder(nn.Module):
 
         # 注意力模块
         # UE attention: query=64, kv=128, heads=2 -> head_dim=64 ✓
-        self.ue_attention = CrossAttention(uav_embed_dim, ue_embed_dim, num_heads, dropout)
+        self.ue_attention = CrossAttention(uav_embed_dim, ue_embed_dim, num_heads)
         # Neighbor attention: query=64, kv=64, heads=2 -> head_dim=32 ✓
-        self.neighbor_attention = CrossAttention(uav_embed_dim, neighbor_out_dim, num_heads, dropout)
+        self.neighbor_attention = CrossAttention(uav_embed_dim, neighbor_out_dim, num_heads)
 
         # 输出维度：uav(64) + ue_attn(128) + neighbor_attn(64) = 256
         self.output_dim = uav_embed_dim + ue_embed_dim + neighbor_out_dim
@@ -393,7 +390,7 @@ class AgentPoolingAttention(nn.Module):
     """
     
     def __init__(self, encoder_dim: int = 256, action_dim: int = config.ACTION_DIM,
-                 action_embed_dim: int = 64, num_heads: int = 8, dropout: float = 0.1):
+                 action_embed_dim: int = 64, num_heads: int = 8):
         super().__init__()
         
         self.encoder_dim = encoder_dim
@@ -414,7 +411,6 @@ class AgentPoolingAttention(nn.Module):
         self.self_attn = nn.MultiheadAttention(
             embed_dim=agent_feature_dim,
             num_heads=num_heads,
-            dropout=dropout,
             batch_first=True
         )
         self.attn_norm = nn.LayerNorm(agent_feature_dim)
@@ -423,7 +419,6 @@ class AgentPoolingAttention(nn.Module):
         self.ffn = nn.Sequential(
             layer_init(nn.Linear(agent_feature_dim, agent_feature_dim * 2)),
             nn.LeakyReLU(0.01),
-            nn.Dropout(dropout),
             layer_init(nn.Linear(agent_feature_dim * 2, agent_feature_dim))
         )
         self.ffn_norm = nn.LayerNorm(agent_feature_dim)

@@ -19,7 +19,6 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
     max_time_steps: int = num_episodes * config.STEPS_PER_EPISODE
     num_updates: int = max_time_steps // config.PPO_ROLLOUT_LENGTH
     assert num_updates > 0, "num_updates is 0, please modify settings."
-    # 保存频率基于 num_updates（而非 num_episodes），确保语义一致
     save_freq: int = max(1, num_updates // 10)
     if num_updates < 1000:
         save_freq = min(100, num_updates)
@@ -55,14 +54,10 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
             # Action statistics
             action_accumulator.append(actions.flatten())
 
-            next_obs, rewards, (total_latency, total_energy, jfi, total_rate, normalizer_stats, step_collisions, step_boundaries) = env.step(actions)
+            next_obs, rewards, (total_latency, total_energy, jfi, total_rate, reward_stats, step_collisions, step_boundaries) = env.step(actions)
             # update_trajectories(env)  # tracking code, comment if not needed
             next_state: np.ndarray = np.concatenate(next_obs, axis=0)
-            # For time-limit truncation, we should not treat the episode as "done" for the value update.
-            # We want to bootstrap from the next state's value.
-            # Only use done=True if the episode terminated due to failure/completion, not timeout.
-            done: bool = False 
-            buffer.add(state, obs_arr, actions, pre_tanh_actions, log_probs, rewards, done, values)
+            buffer.add(state, obs_arr, actions, pre_tanh_actions, log_probs, rewards, terminated=False, values=values)
 
             obs = next_obs
             state = next_state
@@ -75,8 +70,7 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
             rollout_collisions += step_collisions
             rollout_boundaries += step_boundaries
             
-            # Record normalizer stats (accumulate for proper averaging)
-            for key, value in normalizer_stats.items():
+            for key, value in reward_stats.items():
                 if key not in training_stats_accumulator:
                     training_stats_accumulator[key] = []
                 training_stats_accumulator[key].append(value)
@@ -114,11 +108,9 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
             if training_stats_accumulator:
                 averaged_stats = {}
                 for key, values in training_stats_accumulator.items():
-                    # 归一化统计量和状态变量：使用最新值（当前状态）
-                    if '_norm_' in key or key.endswith('_used') or key == 'noise_scale':
+                    if key == 'noise_scale':
                         averaged_stats[key] = float(values[-1])
                     else:
-                        # 其他指标：使用平均值
                         averaged_stats[key] = float(np.mean(values))
                 # Add action statistics
                 if action_accumulator:
@@ -156,8 +148,6 @@ def train_off_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: i
 
     for episode in range(1, num_episodes + 1):
         obs = env.reset()
-        # Don't reset noise scale - we want it to decay across episodes
-        # model.reset() would reset noise to INITIAL_NOISE_SCALE
         episode_reward: float = 0.0
         episode_latency: float = 0.0
         episode_energy: float = 0.0
@@ -182,19 +172,15 @@ def train_off_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: i
             if total_step_count > config.INITIAL_RANDOM_STEPS:
                 action_accumulator.append(actions.flatten())
 
-            next_obs, rewards, (total_latency, total_energy, jfi, total_rate, normalizer_stats, step_collisions, step_boundaries) = env.step(actions)
+            next_obs, rewards, (total_latency, total_energy, jfi, total_rate, reward_stats, step_collisions, step_boundaries) = env.step(actions)
             # update_trajectories(env)  # tracking code, comment if not needed
             
-            # Record normalizer stats every step (accumulate for proper averaging)
-            # This allows monitoring how the normalizer converges from the start
-            for key, value in normalizer_stats.items():
+            for key, value in reward_stats.items():
                 if key not in training_stats_accumulator:
                     training_stats_accumulator[key] = []
                 training_stats_accumulator[key].append(value)
             
-            # For time-limit truncation, we should not treat the episode as "done" for the value update.
-            done: bool = False
-            buffer.add(obs, actions, rewards, next_obs, done)
+            buffer.add(obs, actions, rewards, next_obs, terminated=False)
 
             if total_step_count > config.INITIAL_RANDOM_STEPS and step % config.LEARN_FREQ == 0 and len(buffer) > config.REPLAY_BATCH_SIZE:
                 batch = buffer.sample(config.REPLAY_BATCH_SIZE)
@@ -217,9 +203,6 @@ def train_off_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: i
             episode_collisions += step_collisions
             episode_boundaries += step_boundaries
             
-            if done:
-                break
-
         # Decay exploration noise at the end of each episode (for MATD3/MADDPG)
         # Only decay after warmup phase to avoid premature exploration reduction
         if hasattr(model, 'noise') and total_step_count > config.INITIAL_RANDOM_STEPS:
@@ -242,11 +225,9 @@ def train_off_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: i
             if training_stats_accumulator:
                 averaged_stats = {}
                 for key, values in training_stats_accumulator.items():
-                    # 归一化统计量和状态变量：使用最新值（当前状态）
-                    if '_norm_' in key or key.endswith('_used') or key == 'noise_scale':
+                    if key == 'noise_scale':
                         averaged_stats[key] = float(values[-1])
                     else:
-                        # 其他指标：使用平均值
                         averaged_stats[key] = float(np.mean(values))
                 # Add action statistics
                 if action_accumulator:
@@ -295,9 +276,8 @@ def train_random(env: Env, model: MARLModel, logger: Logger, num_episodes: int) 
                 plot_snapshot(env, episode, step, logger.log_dir, "episode", logger.timestamp)
 
             actions: np.ndarray = model.select_actions(obs, exploration=False)
-            next_obs, rewards, (total_latency, total_energy, jfi, total_rate, normalizer_stats, step_collisions, step_boundaries) = env.step(actions)
+            next_obs, rewards, (total_latency, total_energy, jfi, total_rate, _reward_stats, step_collisions, step_boundaries) = env.step(actions)
             # update_trajectories(env)  # tracking code, comment if not needed
-            done: bool = step >= config.STEPS_PER_EPISODE
             obs = next_obs
 
             episode_reward += np.sum(rewards)
@@ -308,9 +288,6 @@ def train_random(env: Env, model: MARLModel, logger: Logger, num_episodes: int) 
             episode_collisions += step_collisions
             episode_boundaries += step_boundaries
             
-            if done:
-                break
-
         episode_log.append(episode_reward / config.STEPS_PER_EPISODE, episode_latency / config.STEPS_PER_EPISODE, episode_energy / config.STEPS_PER_EPISODE, episode_fairness / config.STEPS_PER_EPISODE, episode_rate / config.STEPS_PER_EPISODE, episode_collisions, episode_boundaries)
         if episode % config.LOG_FREQ == 0:
             elapsed_time: float = time.time() - start_time

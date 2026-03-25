@@ -143,8 +143,7 @@ class CriticNetworkWithAttention(nn.Module):
             encoder_dim=encoder_output_dim,
             action_dim=action_dim,
             action_embed_dim=64,
-            num_heads=4,
-            dropout=config.ATTENTION_DROPOUT
+            num_heads=4
         )
         pooled_dim = self.agent_pooling.output_dim  # 256
 

@@ -10,20 +10,20 @@ class ReplayBuffer:
     def __init__(self, max_size: int) -> None:
         self.buffer: deque[OffPolicyExperienceBatch] = deque(maxlen=max_size)
 
-    def add(self, obs: list[np.ndarray], actions: np.ndarray, rewards: list[float], next_obs: list[np.ndarray], done: bool) -> None:
-        """Store one experience tuple: (joint_obs, joint_actions, joint_rewards, joint_next_obs, joint_dones)"""
+    def add(self, obs: list[np.ndarray], actions: np.ndarray, rewards: list[float], next_obs: list[np.ndarray], terminated: bool) -> None:
+        """Store one transition tuple with per-agent termination flags."""
         obs_arr: np.ndarray = np.array(obs)
         next_obs_arr: np.ndarray = np.array(next_obs)
         rewards_arr: np.ndarray = np.array(rewards)
-        dones_arr: np.ndarray = np.array([done] * config.NUM_UAVS)
-        self.buffer.append((obs_arr, actions, rewards_arr, next_obs_arr, dones_arr))
+        terminated_arr: np.ndarray = np.array([terminated] * config.NUM_UAVS)
+        self.buffer.append((obs_arr, actions, rewards_arr, next_obs_arr, terminated_arr))
 
     def sample(self, batch_size: int) -> OffPolicyExperienceBatch:
         """Sample a batch of experiences."""
         indices: np.ndarray = np.random.choice(len(self.buffer), batch_size, replace=False)
         batch: list[OffPolicyExperienceBatch] = [self.buffer[i] for i in indices]
-        obs_batch, actions_batch, rewards_batch, next_obs_batch, dones_batch = map(np.array, zip(*batch))
-        return obs_batch, actions_batch, rewards_batch, next_obs_batch, dones_batch
+        obs_batch, actions_batch, rewards_batch, next_obs_batch, terminated_batch = map(np.array, zip(*batch))
+        return obs_batch, actions_batch, rewards_batch, next_obs_batch, terminated_batch
 
     def __len__(self) -> int:
         return len(self.buffer)
@@ -62,19 +62,19 @@ class RolloutBuffer:
         pre_tanh_actions: np.ndarray,
         log_probs: np.ndarray,
         rewards: list[float],
-        done: bool,
+        terminated: bool,
         values: np.ndarray,
     ) -> None:
         if self.step >= self.buffer_size:
             raise ValueError("Rollout buffer overflow")
-        dones: np.ndarray = np.array([done] * config.NUM_UAVS)
+        terminated_arr: np.ndarray = np.array([terminated] * config.NUM_UAVS)
         self.states[self.step] = state
         self.observations[self.step] = obs
         self.actions[self.step] = actions
         self.pre_tanh_actions[self.step] = pre_tanh_actions
         self.log_probs[self.step] = log_probs
         self.rewards[self.step] = np.array(rewards)
-        self.dones[self.step] = dones
+        self.dones[self.step] = terminated_arr
         self.values[self.step] = values
 
         self.step += 1

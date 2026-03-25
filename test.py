@@ -31,9 +31,8 @@ def test_model(env: Env, model: MARLModel, logger: Logger, num_episodes: int) ->
                 plot_snapshot(env, episode, step, logger.log_dir, "episode", logger.timestamp)
 
             actions: np.ndarray = model.select_actions(obs, exploration=False)
-            next_obs, rewards, (total_latency, total_energy, jfi, total_rate, normalizer_stats, step_collisions, step_boundaries) = env.step(actions)
+            next_obs, rewards, (total_latency, total_energy, jfi, total_rate, _reward_stats, step_collisions, step_boundaries) = env.step(actions)
             # update_trajectories(env)  # tracking code, comment if not needed
-            done: bool = step >= config.STEPS_PER_EPISODE
             obs = next_obs
 
             episode_reward += np.sum(rewards)
@@ -45,9 +44,6 @@ def test_model(env: Env, model: MARLModel, logger: Logger, num_episodes: int) ->
             episode_collisions += step_collisions
             episode_boundaries += step_boundaries
             
-            if done:
-                break
-
         # Normalize metrics by number of steps for interpretability
         episode_log.append(
             episode_reward / config.STEPS_PER_EPISODE, 

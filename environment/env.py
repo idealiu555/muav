@@ -53,45 +53,6 @@ def _synchronous_trajectory_min_distance(
     return min_dist
 
 
-class RunningNormalizer:
-    """使用指数移动平均的动态归一化器，用于平衡多目标奖励的量级。
-    
-    关键设计：先用旧统计量归一化当前值，再更新统计量。
-    这避免了当前样本影响自身归一化结果的问题。
-    """
-    
-    def __init__(self, momentum: float = 0.96) -> None:
-        self.momentum = momentum
-        self.mean = 0.0
-        self.var = 1.0
-        self.count = 0
-    
-    def normalize(self, x: float) -> float:
-        """先用旧统计量归一化，再更新统计量。"""
-        self.count += 1
-        
-        if self.count == 1:
-            # 第一个样本：初始化统计量，返回 0（无历史参考）
-            self.mean = x
-            self.var = 1.0
-            return 0.0
-        
-        # 用旧统计量归一化当前值
-        std = np.sqrt(self.var) + 1e-8
-        normalized = (x - self.mean) / std
-        
-        # 更新统计量（Welford 在线算法的 EMA 变体）
-        delta_old = x - self.mean
-        self.mean = self.momentum * self.mean + (1 - self.momentum) * x
-        delta_new = x - self.mean
-        self.var = self.momentum * self.var + (1 - self.momentum) * delta_old * delta_new
-        
-        # 防止方差变为负数或过小
-        self.var = max(self.var, 1e-6)
-        
-        return normalized
-
-
 class Env:
     def __init__(self) -> None:
         self._mbs_pos: np.ndarray = config.MBS_POS
@@ -99,12 +60,6 @@ class Env:
         self._ues: list[UE] = [UE(i) for i in range(config.NUM_UES)]
         self._uavs: list[UAV] = [UAV(i) for i in range(config.NUM_UAVS)]
         self._time_step: int = 0
-        
-        # 动态归一化器：跨 episode 积累统计量，平衡各奖励分量的量级
-        # 注：JFI 使用固定映射，不需要动态归一化
-        self._latency_normalizer = RunningNormalizer()
-        self._energy_normalizer = RunningNormalizer()
-        self._rate_normalizer = RunningNormalizer()
 
     @property
     def uavs(self) -> list[UAV]:
@@ -122,7 +77,7 @@ class Env:
         self._prepare_for_next_step()
         return self._get_obs()
 
-    def step(self, actions: np.ndarray) -> tuple[list[np.ndarray], list[float], tuple[float, float, float, float, int, int]]:
+    def step(self, actions: np.ndarray) -> tuple[list[np.ndarray], list[float], tuple[float, float, float, float, dict, int, int]]:
         """Execute one time step of the simulation."""
         self._time_step += 1
 
@@ -246,7 +201,7 @@ class Env:
         - Neighbors (MAX_UAV_NEIGHBORS): features (26) + count (1)
         - Associated UEs (MAX_ASSOCIATED_UES): features (5) + count (1)
 
-        关键改进：不再截断 UE 列表，包含所有关联的 UE，通过 count 字段生成 mask
+        使用固定上限的 UE 列表和 count 字段生成 mask。
         """
         all_obs: list[np.ndarray] = []
 
@@ -299,7 +254,7 @@ class Env:
             # 邻居数量（用于生成 mask）
             neighbor_count = np.array([len(neighbors)], dtype=np.float32)
 
-            # Part 3: State of ALL associated UEs (不再截断！)
+            # Part 3: State of associated UEs (bounded by MAX_ASSOCIATED_UES)
             ue_states: np.ndarray = np.zeros((config.MAX_ASSOCIATED_UES, config.UE_STATE_DIM))
             # 按距离排序所有关联的 UE
             all_ues: list[UE] = sorted(uav.current_covered_ues, key=lambda u: float(np.linalg.norm(uav.pos - u.pos)))
@@ -488,13 +443,7 @@ class Env:
                 ue.interference_power = total_interference
 
     def _get_rewards_and_metrics(self) -> tuple[list[float], tuple[float, float, float, float, dict]]:
-        """Returns the reward and other metrics (latency, energy, jfi, total_rate, normalizer_stats).
-        
-        使用动态归一化平衡各奖励分量：
-        1. 先对原始指标取 log（压缩量级差异）
-        2. 使用 RunningNormalizer 动态归一化到 ~N(0,1)
-        3. 各分量乘以权重后相加
-        """
+        """Returns reward, metrics, and fixed-scale reward diagnostics."""
         total_latency: float = sum(ue.latency_current_request if ue.assigned else config.NON_SERVED_LATENCY_PENALTY for ue in self._ues)
         total_energy: float = sum(uav.energy for uav in self._uavs)
         total_rate: float = sum(uav.total_downlink_rate for uav in self._uavs)
@@ -504,27 +453,15 @@ class Env:
         if sc_metrics.size > 0 and np.sum(sc_metrics**2) > 0:
             jfi = (np.sum(sc_metrics) ** 2) / (sc_metrics.size * np.sum(sc_metrics**2))
 
-        # 动态归一化：latency/energy/rate 取 log 压缩量级
-        log_latency = np.log(total_latency + config.EPSILON)
-        log_energy = np.log(total_energy + config.EPSILON)
-        log_rate = np.log(total_rate + config.EPSILON)
-        
-        # 缓存归一化前的统计量（用于诊断）
-        latency_mean_used = self._latency_normalizer.mean
-        latency_var_used = self._latency_normalizer.var
-        energy_mean_used = self._energy_normalizer.mean
-        energy_var_used = self._energy_normalizer.var
-        rate_mean_used = self._rate_normalizer.mean
-        rate_var_used = self._rate_normalizer.var
-        
-        # 执行归一化（会更新统计量）
-        r_latency: float = config.ALPHA_1 * self._latency_normalizer.normalize(log_latency)
-        r_energy: float = config.ALPHA_2 * self._energy_normalizer.normalize(log_energy)
-        # JFI 使用固定映射：以 0.6 为中心，线性区间 [0.2, 1.0] 映射到 [-2, +2]
+        scaled_latency = total_latency / (config.LATENCY_REWARD_SCALE + config.EPSILON)
+        scaled_energy = total_energy / (config.ENERGY_REWARD_SCALE + config.EPSILON)
+        scaled_rate = total_rate / (config.RATE_REWARD_SCALE + config.EPSILON)
+
+        r_latency: float = config.ALPHA_1 * np.log1p(scaled_latency)
+        r_energy: float = config.ALPHA_2 * np.log1p(scaled_energy)
         r_fairness: float = config.ALPHA_3 * np.clip((jfi - 0.6) * 5.0, -2.0, 2.0)
-        r_rate: float = config.ALPHA_RATE * self._rate_normalizer.normalize(log_rate)
-        
-        # 奖励 = 正向指标 - 负向指标
+        r_rate: float = config.ALPHA_RATE * np.log1p(scaled_rate)
+
         reward: float = r_fairness + r_rate - r_latency - r_energy
         rewards: list[float] = [reward] * config.NUM_UAVS
         for uav in self._uavs:
@@ -535,36 +472,19 @@ class Env:
             if uav.active and uav.boundary_violation:
                 rewards[uav.id] -= config.BOUNDARY_PENALTY
         rewards = [r * config.REWARD_SCALING_FACTOR for r in rewards]
-        
-        # Collect normalizer states and reward components for debugging
-        normalizer_stats = {
-            # 原始指标（step级别，支持平均）
+
+        reward_stats = {
             "total_latency": total_latency,
             "total_energy": total_energy,
             "total_rate": total_rate,
-            # 归一化时使用的统计量（*_used 后缀）
-            "latency_norm_mean_used": latency_mean_used,
-            "latency_norm_var_used": latency_var_used,
-            "energy_norm_mean_used": energy_mean_used,
-            "energy_norm_var_used": energy_var_used,
-            "rate_norm_mean_used": rate_mean_used,
-            "rate_norm_var_used": rate_var_used,
-            # 归一化后的当前统计量
-            "latency_norm_mean": self._latency_normalizer.mean,
-            "latency_norm_var": self._latency_normalizer.var,
-            "energy_norm_mean": self._energy_normalizer.mean,
-            "energy_norm_var": self._energy_normalizer.var,
-            "rate_norm_mean": self._rate_normalizer.mean,
-            "rate_norm_var": self._rate_normalizer.var,
-            # Individual reward components (critical for multi-objective tuning)
+            "scaled_latency": scaled_latency,
+            "scaled_energy": scaled_energy,
+            "scaled_rate": scaled_rate,
             "r_latency": r_latency,
             "r_energy": r_energy,
             "r_fairness": r_fairness,
             "r_rate": r_rate,
-            # Log-transformed values (before normalization, for normalizer diagnosis)
-            "log_latency": log_latency,
-            "log_energy": log_energy,
-            "log_rate": log_rate,
+            "shared_reward": reward,
         }
-        
-        return rewards, (total_latency, total_energy, jfi, total_rate, normalizer_stats)
+
+        return rewards, (total_latency, total_energy, jfi, total_rate, reward_stats)

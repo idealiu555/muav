@@ -63,7 +63,6 @@ ATTENTION_EMBED_DIM: int = 128  # UE 注意力的 embedding 维度 (heads=2, hea
 ATTENTION_UAV_EMBED_DIM: int = 64  # UAV 状态的 embedding 维度
 ATTENTION_NEIGHBOR_DIM: int = 64  # Neighbor 注意力输出维度 (heads=2, head_dim=32)
 ATTENTION_NUM_HEADS: int = 2  # 多头注意力的头数
-ATTENTION_DROPOUT: float = 0.1  # 注意力 dropout 率
 
 POWER_MOVE: float = 60.0  # P_move in Watts
 POWER_HOVER: float = 40.0  # P_hover in Watts
@@ -127,6 +126,9 @@ ALPHA_2: float = 0.8  # weightage for energy (penalty)
 ALPHA_3: float = 1.2  # weightage for fairness/JFI (reward)
 ALPHA_RATE: float = 1.0  # weightage for system throughput (reward)
 REWARD_SCALING_FACTOR: float = 0.12  # scaling factor for rewards (归一化后保持原量级)
+LATENCY_REWARD_SCALE: float = NUM_UES * TIME_SLOT_DURATION
+ENERGY_REWARD_SCALE: float = NUM_UAVS * POWER_HOVER * TIME_SLOT_DURATION
+RATE_REWARD_SCALE: float = 1e8
 
 # UE state: pos(3) + file_id(1) + cache_hit(1) = 5
 UE_STATE_DIM: int = 5
