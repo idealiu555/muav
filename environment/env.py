@@ -77,9 +77,12 @@ class Env:
         self._prepare_for_next_step()
         return self._get_obs()
 
-    def step(self, actions: np.ndarray) -> tuple[list[np.ndarray], list[float], tuple[float, float, float, float, dict, int, int]]:
+    def step(
+        self, actions: np.ndarray
+    ) -> tuple[list[np.ndarray], list[float], tuple[float, float, float, float, dict, int, int], dict[str, np.ndarray]]:
         """Execute one time step of the simulation."""
         self._time_step += 1
+        active_mask = np.array([1.0 if uav.active else 0.0 for uav in self._uavs], dtype=np.float32)
 
         # 0. Apply beam control actions first (affects current slot's communication)
         if config.BEAM_CONTROL_ENABLED:
@@ -124,13 +127,18 @@ class Env:
         # Count violations before resetting logic checks
         step_collisions = sum(1 for uav in self._uavs if uav.collision_violation)
         step_boundaries = sum(1 for uav in self._uavs if uav.boundary_violation)
+        next_active_mask = np.array([1.0 if uav.active else 0.0 for uav in self._uavs], dtype=np.float32)
 
         for uav in self._uavs:
             uav.reset_for_next_step()
 
         self._prepare_for_next_step()
         next_obs: list[np.ndarray] = self._get_obs()
-        return next_obs, rewards, metrics + (step_collisions, step_boundaries)
+        step_info = {
+            "active_mask": active_mask,
+            "next_active_mask": next_active_mask,
+        }
+        return next_obs, rewards, metrics + (step_collisions, step_boundaries), step_info
 
     def _prepare_for_next_step(self) -> None:
         """Prepare environment state for the next time step.

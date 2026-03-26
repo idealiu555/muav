@@ -57,7 +57,7 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
             # Action statistics
             action_accumulator.append(actions.flatten())
 
-            next_obs, rewards, (total_latency, total_energy, jfi, total_rate, reward_stats, step_collisions, step_boundaries) = env.step(actions)
+            next_obs, rewards, (total_latency, total_energy, jfi, total_rate, reward_stats, step_collisions, step_boundaries), _step_info = env.step(actions)
             # update_trajectories(env)  # tracking code, comment if not needed
             next_state: np.ndarray = np.concatenate(next_obs, axis=0)
             episode_done: bool = step == config.STEPS_PER_EPISODE
@@ -166,7 +166,10 @@ def train_off_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: i
 
             total_step_count += 1
             if total_step_count <= config.INITIAL_RANDOM_STEPS:
-                actions: np.ndarray = np.array([np.random.uniform(-1, 1, config.ACTION_DIM) for _ in range(config.NUM_UAVS)])
+                actions = np.zeros((config.NUM_UAVS, config.ACTION_DIM), dtype=np.float32)
+                active_indices = [i for i, uav in enumerate(env.uavs) if uav.active]
+                if active_indices:
+                    actions[active_indices] = np.random.uniform(-1, 1, size=(len(active_indices), config.ACTION_DIM))
             else:
                 actions = model.select_actions(obs, exploration=True)
             
@@ -174,7 +177,7 @@ def train_off_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: i
             if total_step_count > config.INITIAL_RANDOM_STEPS:
                 action_accumulator.append(actions.flatten())
 
-            next_obs, rewards, (total_latency, total_energy, jfi, total_rate, reward_stats, step_collisions, step_boundaries) = env.step(actions)
+            next_obs, rewards, (total_latency, total_energy, jfi, total_rate, reward_stats, step_collisions, step_boundaries), step_info = env.step(actions)
             # update_trajectories(env)  # tracking code, comment if not needed
             
             for key, value in reward_stats.items():
@@ -183,7 +186,8 @@ def train_off_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: i
                 training_stats_accumulator[key].append(value)
             
             episode_done: bool = step == config.STEPS_PER_EPISODE
-            buffer.add(obs, actions, rewards, next_obs, done=episode_done)
+            bootstrap_mask = np.zeros(config.NUM_UAVS, dtype=np.float32) if episode_done else step_info["next_active_mask"]
+            buffer.add(obs, actions, rewards, next_obs, active_mask=step_info["active_mask"], bootstrap_mask=bootstrap_mask)
 
             if total_step_count > config.INITIAL_RANDOM_STEPS and step % config.LEARN_FREQ == 0 and len(buffer) > config.REPLAY_BATCH_SIZE:
                 batch = buffer.sample(config.REPLAY_BATCH_SIZE)
@@ -279,7 +283,7 @@ def train_random(env: Env, model: MARLModel, logger: Logger, num_episodes: int) 
                 plot_snapshot(env, episode, step, logger.log_dir, "episode", logger.timestamp)
 
             actions: np.ndarray = model.select_actions(obs, exploration=False)
-            next_obs, rewards, (total_latency, total_energy, jfi, total_rate, _reward_stats, step_collisions, step_boundaries) = env.step(actions)
+            next_obs, rewards, (total_latency, total_energy, jfi, total_rate, _reward_stats, step_collisions, step_boundaries), _step_info = env.step(actions)
             # update_trajectories(env)  # tracking code, comment if not needed
             obs = next_obs
 

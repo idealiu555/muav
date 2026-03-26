@@ -1,6 +1,6 @@
 from marl_models.base_model import MARLModel, ExperienceBatch
 from marl_models.masac.agents import ActorNetwork, CriticNetwork
-from marl_models.buffer_and_helpers import soft_update
+from marl_models.buffer_and_helpers import soft_update, masked_mean
 import config
 import torch
 import torch.nn.functional as F
@@ -39,10 +39,12 @@ class MASAC(MARLModel):
         # Batch observations for better GPU utilization
         obs_array: np.ndarray = np.array(observations, dtype=np.float32)
         obs_tensor: torch.Tensor = torch.from_numpy(obs_array).to(self.device, non_blocking=True)
-        
-        actions: list[np.ndarray] = []
+
+        actions = np.zeros((self.num_agents, self.action_dim), dtype=np.float32)
         with torch.no_grad():
             for i in range(self.num_agents):
+                if obs_array[i, config.OWN_STATE_DIM - 1] < 0.5:
+                    continue
                 if exploration:
                     action, _ = self.actors[i].sample(obs_tensor[i:i+1])
                 else:
@@ -51,17 +53,23 @@ class MASAC(MARLModel):
                     mean, log_std = self.actors[i](obs_tensor[i:i+1])
                     # Use mean of pre-tanh distribution, then apply tanh (consistent with training)
                     action = torch.tanh(mean)
-                actions.append(action.squeeze(0).cpu().numpy())
-        return np.array(actions)
+                actions[i] = action.squeeze(0).cpu().numpy()
+        return actions
 
     def update(self, batch: ExperienceBatch) -> dict:
-        assert isinstance(batch, tuple) and len(batch) == 5, "MASAC expects OffPolicyExperienceBatch (tuple of 5 elements)"
-        obs_batch, actions_batch, rewards_batch, next_obs_batch, dones_batch = batch
+        assert isinstance(batch, dict), "MASAC expects OffPolicyExperienceBatch (dict)"
+        obs_batch = batch["obs"]
+        actions_batch = batch["actions"]
+        rewards_batch = batch["rewards"]
+        next_obs_batch = batch["next_obs"]
+        active_mask_batch = batch["active_mask"]
+        bootstrap_mask_batch = batch["bootstrap_mask"]
         obs_tensor = torch.as_tensor(obs_batch, dtype=torch.float32, device=self.device)
         actions_tensor = torch.as_tensor(actions_batch, dtype=torch.float32, device=self.device)
         rewards_tensor = torch.as_tensor(rewards_batch, dtype=torch.float32, device=self.device)
         next_obs_tensor = torch.as_tensor(next_obs_batch, dtype=torch.float32, device=self.device)
-        dones_tensor = torch.as_tensor(dones_batch, dtype=torch.float32, device=self.device)
+        active_mask_tensor = torch.as_tensor(active_mask_batch, dtype=torch.float32, device=self.device)
+        bootstrap_mask_tensor = torch.as_tensor(bootstrap_mask_batch, dtype=torch.float32, device=self.device)
 
         batch_size: int = obs_tensor.shape[0]
         obs_flat: torch.Tensor = obs_tensor.reshape(batch_size, -1)
@@ -75,6 +83,7 @@ class MASAC(MARLModel):
         total_critic_grad_norm: float = 0.0
         alphas: list[float] = []
         q_values: list[float] = []
+        updated_agents: int = 0
 
         alpha_tensors: list[torch.Tensor] = [log_alpha.exp() for log_alpha in self.log_alphas]
         alphas = [alpha.item() for alpha in alpha_tensors]
@@ -85,12 +94,15 @@ class MASAC(MARLModel):
             next_log_probs_list: list[torch.Tensor] = []
             for i in range(self.num_agents):
                 next_action, next_log_prob = self.actors[i].sample(next_obs_tensor[:, i, :])
-                next_actions_list.append(next_action)
+                next_actions_list.append(next_action * bootstrap_mask_tensor[:, i:i + 1])
                 next_log_probs_list.append(next_log_prob)
 
             next_actions_tensor: torch.Tensor = torch.cat(next_actions_list, dim=1)
 
         for agent_idx in range(self.num_agents):
+            valid_mask: torch.Tensor = active_mask_tensor[:, agent_idx:agent_idx + 1]
+            if valid_mask.sum().item() == 0.0:
+                continue
             alpha: torch.Tensor = alpha_tensors[agent_idx]
 
             # Update Critic
@@ -105,15 +117,14 @@ class MASAC(MARLModel):
                 target_q: torch.Tensor = min_target_q - alpha * agent_next_log_prob
 
                 agent_reward: torch.Tensor = rewards_tensor[:, agent_idx].unsqueeze(1)
-                agent_done: torch.Tensor = dones_tensor[:, agent_idx].unsqueeze(1)
-                y: torch.Tensor = agent_reward + config.DISCOUNT_FACTOR * target_q * (1 - agent_done)
+                agent_bootstrap: torch.Tensor = bootstrap_mask_tensor[:, agent_idx].unsqueeze(1)
+                y: torch.Tensor = agent_reward + config.DISCOUNT_FACTOR * target_q * agent_bootstrap
 
             # Compute loss for both critics
             current_q1: torch.Tensor = self.critics_1[agent_idx](obs_flat, actions_flat)
             current_q2: torch.Tensor = self.critics_2[agent_idx](obs_flat, actions_flat)
-            # Use Huber loss for more stable training with outliers
-            critic_1_loss: torch.Tensor = F.smooth_l1_loss(current_q1, y)
-            critic_2_loss: torch.Tensor = F.smooth_l1_loss(current_q2, y)
+            critic_1_loss: torch.Tensor = masked_mean(F.smooth_l1_loss(current_q1, y, reduction="none"), valid_mask)
+            critic_2_loss: torch.Tensor = masked_mean(F.smooth_l1_loss(current_q2, y, reduction="none"), valid_mask)
 
             # Combined critic update for better GPU utilization
             self.critic_1_optimizers[agent_idx].zero_grad(set_to_none=True)
@@ -127,56 +138,70 @@ class MASAC(MARLModel):
 
             total_critic_loss += combined_critic_loss.item()
             total_critic_grad_norm += float(max(c1_grad, c2_grad))
-            q_values.extend(current_q1.detach().cpu().numpy().flatten().tolist())
+            q_values.extend(current_q1[valid_mask.squeeze(1).bool()].detach().cpu().numpy().flatten().tolist())
 
             # Update Actor and Alpha
             pred_actions_list: list[torch.Tensor] = []
             agent_log_prob: torch.Tensor = None
             for i in range(self.num_agents):
+                agent_active = active_mask_tensor[:, i:i + 1]
                 if i == agent_idx:
                     pred_action, agent_log_prob = self.actors[i].sample(obs_tensor[:, i, :])
-                    pred_actions_list.append(pred_action)
+                    pred_actions_list.append(pred_action * agent_active)
                 else:
                     with torch.no_grad():
                         other_action, _ = self.actors[i].sample(obs_tensor[:, i, :])
-                    pred_actions_list.append(other_action.detach())
+                    pred_actions_list.append((other_action * agent_active).detach())
 
             pred_actions_flat: torch.Tensor = torch.cat(pred_actions_list, dim=1)
 
+            for param in self.critics_1[agent_idx].parameters():
+                param.requires_grad_(False)
+            for param in self.critics_2[agent_idx].parameters():
+                param.requires_grad_(False)
             q1_pred: torch.Tensor = self.critics_1[agent_idx](obs_flat, pred_actions_flat)
             q2_pred: torch.Tensor = self.critics_2[agent_idx](obs_flat, pred_actions_flat)
             min_q_pred: torch.Tensor = torch.min(q1_pred, q2_pred)
 
             # Standard SAC actor loss: maximize Q value while minimizing entropy
-            actor_loss: torch.Tensor = (agent_log_prob * alpha.detach() - min_q_pred).mean()
+            actor_loss: torch.Tensor = masked_mean(agent_log_prob * alpha.detach() - min_q_pred, valid_mask)
             self.actor_optimizers[agent_idx].zero_grad(set_to_none=True)
             actor_loss.backward()
             a_grad = torch.nn.utils.clip_grad_norm_(self.actors[agent_idx].parameters(), config.MAX_GRAD_NORM)
             self.actor_optimizers[agent_idx].step()
+            for param in self.critics_1[agent_idx].parameters():
+                param.requires_grad_(True)
+            for param in self.critics_2[agent_idx].parameters():
+                param.requires_grad_(True)
 
             total_actor_loss += actor_loss.item()
             total_actor_grad_norm += float(a_grad)
 
             # Update alpha (temperature)
-            alpha_loss: torch.Tensor = -(self.log_alphas[agent_idx] * (agent_log_prob + self.target_entropy).detach()).mean()
+            alpha_loss: torch.Tensor = -masked_mean(
+                self.log_alphas[agent_idx] * (agent_log_prob + self.target_entropy).detach(),
+                valid_mask,
+            )
             self.alpha_optimizers[agent_idx].zero_grad(set_to_none=True)
             alpha_loss.backward()
             self.alpha_optimizers[agent_idx].step()
 
             total_alpha_loss += alpha_loss.item()
+            updated_agents += 1
 
             # Soft update target networks
             soft_update(self.target_critics_1[agent_idx], self.critics_1[agent_idx], config.UPDATE_FACTOR)
             soft_update(self.target_critics_2[agent_idx], self.critics_2[agent_idx], config.UPDATE_FACTOR)
-        
+
+        normalizer = max(1, updated_agents)
         return {
-            "actor_loss": total_actor_loss / self.num_agents,
-            "critic_loss": total_critic_loss / self.num_agents,
-            "alpha_loss": total_alpha_loss / self.num_agents,
+            "actor_loss": total_actor_loss / normalizer,
+            "critic_loss": total_critic_loss / normalizer,
+            "alpha_loss": total_alpha_loss / normalizer,
             "alpha_mean": float(np.mean(alphas)),
-            "actor_grad_norm": total_actor_grad_norm / self.num_agents,
-            "critic_grad_norm": total_critic_grad_norm / self.num_agents,
-            "q_value_mean": float(np.mean(q_values)),
+            "actor_grad_norm": total_actor_grad_norm / normalizer,
+            "critic_grad_norm": total_critic_grad_norm / normalizer,
+            "q_value_mean": float(np.mean(q_values)) if q_values else 0.0,
         }
 
     def _init_target_networks(self) -> None:

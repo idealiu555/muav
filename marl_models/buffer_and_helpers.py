@@ -10,20 +10,36 @@ class ReplayBuffer:
     def __init__(self, max_size: int) -> None:
         self.buffer: deque[OffPolicyExperienceBatch] = deque(maxlen=max_size)
 
-    def add(self, obs: list[np.ndarray], actions: np.ndarray, rewards: list[float], next_obs: list[np.ndarray], done: bool) -> None:
-        """Store one transition tuple with a bootstrap-stop mask for all agents."""
+    def add(
+        self,
+        obs: list[np.ndarray],
+        actions: np.ndarray,
+        rewards: list[float],
+        next_obs: list[np.ndarray],
+        active_mask: np.ndarray,
+        bootstrap_mask: np.ndarray,
+    ) -> None:
+        """Store one transition tuple with explicit agent activity/bootstrap masks."""
         obs_arr: np.ndarray = np.array(obs)
         next_obs_arr: np.ndarray = np.array(next_obs)
         rewards_arr: np.ndarray = np.array(rewards)
-        done_arr: np.ndarray = np.array([done] * config.NUM_UAVS)
-        self.buffer.append((obs_arr, actions, rewards_arr, next_obs_arr, done_arr))
+        self.buffer.append(
+            {
+                "obs": obs_arr,
+                "actions": actions,
+                "rewards": rewards_arr,
+                "next_obs": next_obs_arr,
+                "active_mask": active_mask.astype(np.float32, copy=False),
+                "bootstrap_mask": bootstrap_mask.astype(np.float32, copy=False),
+            }
+        )
 
     def sample(self, batch_size: int) -> OffPolicyExperienceBatch:
         """Sample a batch of experiences."""
         indices: np.ndarray = np.random.choice(len(self.buffer), batch_size, replace=False)
         batch: list[OffPolicyExperienceBatch] = [self.buffer[i] for i in indices]
-        obs_batch, actions_batch, rewards_batch, next_obs_batch, terminated_batch = map(np.array, zip(*batch))
-        return obs_batch, actions_batch, rewards_batch, next_obs_batch, terminated_batch
+        keys = batch[0].keys()
+        return {key: np.array([experience[key] for experience in batch]) for key in keys}
 
     def __len__(self) -> int:
         return len(self.buffer)
@@ -149,6 +165,13 @@ def soft_update(target_net: torch.nn.Module, source_net: torch.nn.Module, tau: f
     with torch.no_grad():
         for target_param, param in zip(target_net.parameters(), source_net.parameters()):
             target_param.copy_(tau * param + (1.0 - tau) * target_param)
+
+
+def masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Compute a numerically stable mean over masked samples."""
+    weights = mask.to(dtype=values.dtype)
+    denom = weights.sum().clamp_min(1.0)
+    return (values * weights).sum() / denom
 
 
 class GaussianNoise:

@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 import numpy as np
 import torch
 
-OffPolicyExperienceBatch = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+OffPolicyExperienceBatch = dict[str, np.ndarray]
 OnPolicyExperienceBatch = dict[str, torch.Tensor]
 ExperienceBatch = OffPolicyExperienceBatch | OnPolicyExperienceBatch
 
@@ -41,7 +41,8 @@ class MARLModel(ABC):
         Performs a learning update on the model's networks using a batch of experiences.
 
         Args:
-            batch (ExperienceBatch): A dictionary (for on-policy) or a tuple (for off-policy).
+            batch (ExperienceBatch): A dictionary containing either
+                on-policy rollout tensors or off-policy replay arrays.
         
         Returns:
             dict: Training statistics (loss, grad norms, etc.). Empty dict if not applicable.

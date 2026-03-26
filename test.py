@@ -31,7 +31,7 @@ def test_model(env: Env, model: MARLModel, logger: Logger, num_episodes: int) ->
                 plot_snapshot(env, episode, step, logger.log_dir, "episode", logger.timestamp)
 
             actions: np.ndarray = model.select_actions(obs, exploration=False)
-            next_obs, rewards, (total_latency, total_energy, jfi, total_rate, _reward_stats, step_collisions, step_boundaries) = env.step(actions)
+            next_obs, rewards, (total_latency, total_energy, jfi, total_rate, _reward_stats, step_collisions, step_boundaries), _step_info = env.step(actions)
             # update_trajectories(env)  # tracking code, comment if not needed
             obs = next_obs
 
