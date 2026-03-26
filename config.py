@@ -58,7 +58,7 @@ assert MAX_UAV_NEIGHBORS >= 1 and MAX_UAV_NEIGHBORS <= NUM_UAVS - 1
 assert MAX_ASSOCIATED_UES >= 1 and MAX_ASSOCIATED_UES <= NUM_UES
 
 # Attention Mechanism Parameters (注意力机制参数)
-USE_ATTENTION: bool = True  # 是否使用注意力机制处理可变长度 UE 列表
+USE_ATTENTION: bool = False  # 是否使用注意力机制处理可变长度 UE 列表
 ATTENTION_EMBED_DIM: int = 128  # UE 注意力的 embedding 维度 (heads=2, head_dim=64)
 ATTENTION_UAV_EMBED_DIM: int = 64  # UAV 状态的 embedding 维度
 ATTENTION_NEIGHBOR_DIM: int = 64  # Neighbor 注意力输出维度 (heads=2, head_dim=32)

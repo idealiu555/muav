@@ -10,13 +10,13 @@ class ReplayBuffer:
     def __init__(self, max_size: int) -> None:
         self.buffer: deque[OffPolicyExperienceBatch] = deque(maxlen=max_size)
 
-    def add(self, obs: list[np.ndarray], actions: np.ndarray, rewards: list[float], next_obs: list[np.ndarray], terminated: bool) -> None:
-        """Store one transition tuple with per-agent termination flags."""
+    def add(self, obs: list[np.ndarray], actions: np.ndarray, rewards: list[float], next_obs: list[np.ndarray], done: bool) -> None:
+        """Store one transition tuple with a bootstrap-stop mask for all agents."""
         obs_arr: np.ndarray = np.array(obs)
         next_obs_arr: np.ndarray = np.array(next_obs)
         rewards_arr: np.ndarray = np.array(rewards)
-        terminated_arr: np.ndarray = np.array([terminated] * config.NUM_UAVS)
-        self.buffer.append((obs_arr, actions, rewards_arr, next_obs_arr, terminated_arr))
+        done_arr: np.ndarray = np.array([done] * config.NUM_UAVS)
+        self.buffer.append((obs_arr, actions, rewards_arr, next_obs_arr, done_arr))
 
     def sample(self, batch_size: int) -> OffPolicyExperienceBatch:
         """Sample a batch of experiences."""
@@ -62,26 +62,26 @@ class RolloutBuffer:
         pre_tanh_actions: np.ndarray,
         log_probs: np.ndarray,
         rewards: list[float],
-        terminated: bool,
+        done: bool,
         values: np.ndarray,
     ) -> None:
         if self.step >= self.buffer_size:
             raise ValueError("Rollout buffer overflow")
-        terminated_arr: np.ndarray = np.array([terminated] * config.NUM_UAVS)
+        done_arr: np.ndarray = np.array([done] * config.NUM_UAVS)
         self.states[self.step] = state
         self.observations[self.step] = obs
         self.actions[self.step] = actions
         self.pre_tanh_actions[self.step] = pre_tanh_actions
         self.log_probs[self.step] = log_probs
         self.rewards[self.step] = np.array(rewards)
-        self.dones[self.step] = terminated_arr
+        self.dones[self.step] = done_arr
         self.values[self.step] = values
 
         self.step += 1
 
     def compute_returns_and_advantages(self, last_values: np.ndarray, gamma: float, gae_lambda: float) -> None:
         """Computes the advantages and returns for the collected trajectories using GAE."""
-        last_gae_lam: float = 0.0
+        last_gae_lam: np.ndarray = np.zeros(self.num_agents, dtype=np.float32)
         for t in reversed(range(self.buffer_size)):
             if t == self.buffer_size - 1:
                 next_values: np.ndarray = last_values

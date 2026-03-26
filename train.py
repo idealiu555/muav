@@ -15,10 +15,13 @@ import time
 
 def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: int) -> None:
     start_time: float = time.time()
+    if config.PPO_ROLLOUT_LENGTH != config.STEPS_PER_EPISODE:
+        raise ValueError(
+            "MAPPO uses full-episode rollouts in this finite-horizon environment. "
+            "Set PPO_ROLLOUT_LENGTH == STEPS_PER_EPISODE."
+        )
     buffer: RolloutBuffer = RolloutBuffer(num_agents=config.NUM_UAVS, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, state_dim=config.STATE_DIM, buffer_size=config.PPO_ROLLOUT_LENGTH, device=model.device)
-    max_time_steps: int = num_episodes * config.STEPS_PER_EPISODE
-    num_updates: int = max_time_steps // config.PPO_ROLLOUT_LENGTH
-    assert num_updates > 0, "num_updates is 0, please modify settings."
+    num_updates: int = num_episodes
     save_freq: int = max(1, num_updates // 10)
     if num_updates < 1000:
         save_freq = min(100, num_updates)
@@ -57,7 +60,8 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
             next_obs, rewards, (total_latency, total_energy, jfi, total_rate, reward_stats, step_collisions, step_boundaries) = env.step(actions)
             # update_trajectories(env)  # tracking code, comment if not needed
             next_state: np.ndarray = np.concatenate(next_obs, axis=0)
-            buffer.add(state, obs_arr, actions, pre_tanh_actions, log_probs, rewards, terminated=False, values=values)
+            episode_done: bool = step == config.STEPS_PER_EPISODE
+            buffer.add(state, obs_arr, actions, pre_tanh_actions, log_probs, rewards, done=episode_done, values=values)
 
             obs = next_obs
             state = next_state
@@ -75,9 +79,7 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
                     training_stats_accumulator[key] = []
                 training_stats_accumulator[key].append(value)
 
-        with torch.no_grad():
-            _, _, last_values, _ = model.get_action_and_value(np.array(obs), state)
-
+        last_values: np.ndarray = np.zeros(config.NUM_UAVS, dtype=np.float32)
         buffer.compute_returns_and_advantages(last_values, config.DISCOUNT_FACTOR, config.PPO_GAE_LAMBDA)
 
         for _ in range(config.PPO_EPOCHS):
@@ -180,7 +182,8 @@ def train_off_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: i
                     training_stats_accumulator[key] = []
                 training_stats_accumulator[key].append(value)
             
-            buffer.add(obs, actions, rewards, next_obs, terminated=False)
+            episode_done: bool = step == config.STEPS_PER_EPISODE
+            buffer.add(obs, actions, rewards, next_obs, done=episode_done)
 
             if total_step_count > config.INITIAL_RANDOM_STEPS and step % config.LEARN_FREQ == 0 and len(buffer) > config.REPLAY_BATCH_SIZE:
                 batch = buffer.sample(config.REPLAY_BATCH_SIZE)
