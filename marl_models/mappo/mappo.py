@@ -1,5 +1,6 @@
 from marl_models.base_model import MARLModel, ExperienceBatch
 from marl_models.mappo.agents import ActorNetwork, CriticNetwork
+from marl_models.buffer_and_helpers import masked_mean
 import config
 import numpy as np
 import os
@@ -12,6 +13,7 @@ class MAPPO(MARLModel):
     def __init__(self, model_name: str, num_agents: int, obs_dim: int, action_dim: int, state_dim: int, device: str) -> None:
         super().__init__(model_name, num_agents, obs_dim, action_dim, device)
         self.state_dim: int = state_dim
+        self.active_flag_index: int = config.OWN_STATE_DIM - 1
 
         # Create networks
         self.actors: ActorNetwork = ActorNetwork(obs_dim, action_dim).to(device)
@@ -31,17 +33,22 @@ class MAPPO(MARLModel):
         log_probs = log_probs.sum(dim=-1)
         return squashed_action, log_probs
 
+    def _get_active_mask(self, obs: np.ndarray) -> torch.Tensor:
+        active_mask_np = (obs[:, self.active_flag_index] >= 0.5).astype(np.float32)
+        return torch.from_numpy(active_mask_np).to(self.device, non_blocking=True)
+
     def select_actions(self, observations: list[np.ndarray], exploration: bool) -> np.ndarray:
         # Convert observations to tensor once (avoid repeated conversions)
         obs_array: np.ndarray = np.array(observations, dtype=np.float32)
         obs_tensor: torch.Tensor = torch.from_numpy(obs_array).to(self.device, non_blocking=True)
+        action_mask: torch.Tensor = self._get_active_mask(obs_array).unsqueeze(1)
         with torch.no_grad():
             dist: Normal = self.actors(obs_tensor)
             if exploration:
                 pre_tanh_actions: torch.Tensor = dist.sample()
             else:
                 pre_tanh_actions = dist.mean
-            actions: torch.Tensor = torch.tanh(pre_tanh_actions)
+            actions: torch.Tensor = torch.tanh(pre_tanh_actions) * action_mask
 
         return actions.cpu().numpy()
 
@@ -50,11 +57,16 @@ class MAPPO(MARLModel):
         # Use non_blocking for async data transfer
         obs_tensor: torch.Tensor = torch.from_numpy(obs.astype(np.float32)).to(self.device, non_blocking=True)
         state_tensor: torch.Tensor = torch.from_numpy(state.astype(np.float32)).to(self.device, non_blocking=True)
+        active_mask: torch.Tensor = self._get_active_mask(obs)
+        action_mask: torch.Tensor = active_mask.unsqueeze(1)
 
         with torch.no_grad():
             dist: Normal = self.actors(obs_tensor)
             pre_tanh_actions: torch.Tensor = dist.sample()
             actions, log_probs = self._squash_action_and_log_prob(dist, pre_tanh_actions)
+            actions = actions * action_mask
+            pre_tanh_actions = pre_tanh_actions * action_mask
+            log_probs = log_probs * active_mask
 
             if state_tensor.dim() == 1:
                 state_tensor = state_tensor.unsqueeze(0)
@@ -71,24 +83,44 @@ class MAPPO(MARLModel):
         returns_batch: torch.Tensor = batch["returns"]
         states_batch: torch.Tensor = batch["states"]
         old_values_batch: torch.Tensor = batch["old_values"]
+        active_mask_batch: torch.Tensor = batch["active_mask"]
         agent_indices_batch: torch.Tensor = batch["agent_indices"]
 
-        # Normalize advantages with clipping for numerical stability
-        advantages_batch = (advantages_batch - advantages_batch.mean()) / (advantages_batch.std() + 1e-8)
-        advantages_batch = torch.clamp(advantages_batch, -10.0, 10.0)
+        valid_mask: torch.Tensor = active_mask_batch.float()
+        valid_mask_bool: torch.Tensor = valid_mask.bool()
+        valid_count = int(valid_mask.sum().item())
+
+        if valid_count > 0:
+            valid_advantages: torch.Tensor = advantages_batch[valid_mask_bool]
+            if valid_count > 1:
+                adv_mean: torch.Tensor = valid_advantages.mean()
+                adv_std: torch.Tensor = valid_advantages.std(unbiased=False)
+                valid_advantages = (valid_advantages - adv_mean) / (adv_std + 1e-8)
+            valid_advantages = torch.clamp(valid_advantages, -10.0, 10.0)
+            advantages_batch = torch.zeros_like(advantages_batch)
+            advantages_batch[valid_mask_bool] = valid_advantages
+        else:
+            return {
+                "actor_loss": 0.0,
+                "critic_loss": 0.0,
+                "entropy": 0.0,
+                "ratio_mean": 0.0,
+                "approx_kl": 0.0,
+                "clip_fraction": 0.0,
+                "actor_grad_norm": 0.0,
+                "critic_grad_norm": 0.0,
+                "value_mean": 0.0,
+                "valid_samples": 0.0,
+            }
 
         # Critic Loss
-        # The states_batch contains repeated states for each agent after shuffling.
-        # We use agent_indices_batch to correctly extract the value for each agent.
         batch_size = states_batch.shape[0]
         values_all: torch.Tensor = self.critics(states_batch)  # Shape: (batch_size, num_agents)
-        # Extract the value for the corresponding agent using the tracked indices
         values: torch.Tensor = values_all[torch.arange(batch_size, device=values_all.device), agent_indices_batch]
-        # Value clipping - apply clipping to the extracted values
         values_clipped: torch.Tensor = old_values_batch + torch.clamp(values - old_values_batch, -config.PPO_VALUE_CLIP_EPS, config.PPO_VALUE_CLIP_EPS)
         vf_loss1: torch.Tensor = (values - returns_batch).pow(2)
         vf_loss2: torch.Tensor = (values_clipped - returns_batch).pow(2)
-        critic_loss: torch.Tensor = 0.5 * torch.max(vf_loss1, vf_loss2).mean()
+        critic_loss: torch.Tensor = 0.5 * masked_mean(torch.max(vf_loss1, vf_loss2), valid_mask)
 
         # Actor Loss
         dist: Normal = self.actors(obs_batch)
@@ -103,15 +135,15 @@ class MAPPO(MARLModel):
         # PPO surrogate loss
         surr1: torch.Tensor = ratio * advantages_batch
         surr2: torch.Tensor = torch.clamp(ratio, 1.0 - config.PPO_CLIP_EPS, 1.0 + config.PPO_CLIP_EPS) * advantages_batch
-        actor_loss: torch.Tensor = -torch.min(surr1, surr2).mean()
+        actor_loss: torch.Tensor = -masked_mean(torch.min(surr1, surr2), valid_mask)
 
         # Use pre-tanh entropy by default for lower-variance PPO updates.
         if config.PPO_USE_SQUASHED_ENTROPY:
             entropy_pre_tanh: torch.Tensor = dist.rsample()
             _, entropy_log_probs = self._squash_action_and_log_prob(dist, entropy_pre_tanh)
-            entropy: torch.Tensor = (-entropy_log_probs).mean()
+            entropy: torch.Tensor = masked_mean(-entropy_log_probs, valid_mask)
         else:
-            entropy = dist.entropy().sum(dim=-1).mean()
+            entropy = masked_mean(dist.entropy().sum(dim=-1), valid_mask)
         actor_loss -= config.PPO_ENTROPY_COEF * entropy
 
         # Combined update: zero gradients once, compute both losses, then step
@@ -132,12 +164,13 @@ class MAPPO(MARLModel):
             "actor_loss": actor_loss.item(),
             "critic_loss": critic_loss.item(),
             "entropy": entropy.item(),
-            "ratio_mean": ratio.mean().item(),
-            "approx_kl": (old_log_probs_batch - new_log_probs).abs().mean().item(),
-            "clip_fraction": (torch.abs(ratio - 1.0) > config.PPO_CLIP_EPS).float().mean().item(),
+            "ratio_mean": masked_mean(ratio, valid_mask).item(),
+            "approx_kl": masked_mean((old_log_probs_batch - new_log_probs).abs(), valid_mask).item(),
+            "clip_fraction": masked_mean((torch.abs(ratio - 1.0) > config.PPO_CLIP_EPS).float(), valid_mask).item(),
             "actor_grad_norm": float(actor_grad_norm),
             "critic_grad_norm": float(critic_grad_norm),
-            "value_mean": values.mean().item(),
+            "value_mean": masked_mean(values, valid_mask).item(),
+            "valid_samples": float(valid_count),
         }
 
     def reset(self) -> None:

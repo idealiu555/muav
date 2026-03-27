@@ -180,7 +180,6 @@ NOISE_CLIP: float = 0.5  # range to clip target policy smoothing noise
 
 # MAPPO Specific Hyperparameters
 PPO_ROLLOUT_LENGTH: int = 1000  # number of steps to collect per rollout (Set to STEPS_PER_EPISODE for episodic tasks)
-PPO_GAE_LAMBDA: float = 0.95  # lambda parameter for GAE
 PPO_EPOCHS: int = 10  # number of epochs to run on the collected rollout data
 PPO_BATCH_SIZE: int = 512  # size of mini-batches to use during the update step (increased from 64 for better GPU utilization)
 PPO_CLIP_EPS: float = 0.2  # clipping parameter (epsilon) for the PPO surrogate objective

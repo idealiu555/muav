@@ -331,6 +331,25 @@ def generate_plots(
     print(f"✅ Academic-style plots saved to {output_dir}\n")
 
 
+def generate_plots_if_available(
+    log_file: str,
+    output_dir: str,
+    output_file_prefix: str,
+    timestamp: str,
+    smoothing: float = 0.9,
+) -> bool:
+    """Generate plots only when a non-empty log file exists."""
+    if not os.path.exists(log_file):
+        print(f"ℹ️ Skipping plot generation: no log data at {log_file}")
+        return False
+    if os.path.getsize(log_file) == 0:
+        print(f"ℹ️ Skipping plot generation: log file is empty at {log_file}")
+        return False
+
+    generate_plots(log_file, output_dir, output_file_prefix, timestamp, smoothing)
+    return True
+
+
 def generate_plots_from_file(log_file: str, output_dir: Optional[str] = None, smoothing: float = 0.9) -> None:
     """
     便捷函数：直接从日志文件生成图表。

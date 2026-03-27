@@ -49,7 +49,6 @@ class RolloutBuffer:
     def __init__(self, num_agents: int, obs_dim: int, action_dim: int, state_dim: int, buffer_size: int, device: str) -> None:
         self.num_agents: int = num_agents
         self.obs_dim: int = obs_dim
-        self.action_dim: int = action_dim
         self.state_dim: int = state_dim
         self.buffer_size: int = buffer_size
         self.device: str = device
@@ -57,14 +56,13 @@ class RolloutBuffer:
         # Initialize storage
         self.states: np.ndarray = np.zeros((buffer_size, state_dim), dtype=np.float32)
         self.observations: np.ndarray = np.zeros((buffer_size, num_agents, obs_dim), dtype=np.float32)
-        self.actions: np.ndarray = np.zeros((buffer_size, num_agents, action_dim), dtype=np.float32)
         self.pre_tanh_actions: np.ndarray = np.zeros((buffer_size, num_agents, action_dim), dtype=np.float32)
         self.log_probs: np.ndarray = np.zeros((buffer_size, num_agents), dtype=np.float32)
         self.rewards: np.ndarray = np.zeros((buffer_size, num_agents), dtype=np.float32)
-        self.dones: np.ndarray = np.zeros((buffer_size, num_agents), dtype=np.float32)
         self.values: np.ndarray = np.zeros((buffer_size, num_agents), dtype=np.float32)
+        self.active_masks: np.ndarray = np.zeros((buffer_size, num_agents), dtype=np.float32)
 
-        # For GAE calculation
+        # For on-policy return/advantage calculation
         self.advantages: np.ndarray = np.zeros((buffer_size, num_agents), dtype=np.float32)
         self.returns: np.ndarray = np.zeros((buffer_size, num_agents), dtype=np.float32)
 
@@ -74,69 +72,63 @@ class RolloutBuffer:
         self,
         state: np.ndarray,
         obs: np.ndarray,
-        actions: np.ndarray,
         pre_tanh_actions: np.ndarray,
         log_probs: np.ndarray,
         rewards: list[float],
-        done: bool,
         values: np.ndarray,
+        active_mask: np.ndarray,
     ) -> None:
         if self.step >= self.buffer_size:
             raise ValueError("Rollout buffer overflow")
-        done_arr: np.ndarray = np.array([done] * config.NUM_UAVS)
         self.states[self.step] = state
         self.observations[self.step] = obs
-        self.actions[self.step] = actions
         self.pre_tanh_actions[self.step] = pre_tanh_actions
         self.log_probs[self.step] = log_probs
         self.rewards[self.step] = np.array(rewards)
-        self.dones[self.step] = done_arr
         self.values[self.step] = values
+        self.active_masks[self.step] = active_mask.astype(np.float32, copy=False)
 
         self.step += 1
 
-    def compute_returns_and_advantages(self, last_values: np.ndarray, gamma: float, gae_lambda: float) -> None:
-        """Computes the advantages and returns for the collected trajectories using GAE."""
-        last_gae_lam: np.ndarray = np.zeros(self.num_agents, dtype=np.float32)
-        for t in reversed(range(self.buffer_size)):
-            if t == self.buffer_size - 1:
-                next_values: np.ndarray = last_values
-            else:
-                next_values = self.values[t + 1]
+    def compute_returns_and_advantages(self, gamma: float) -> None:
+        """Compute exact discounted returns over the shared-reward rollout."""
+        num_steps = self.step
+        discounted_return: np.ndarray = np.zeros(self.num_agents, dtype=np.float32)
 
-            delta: np.ndarray = self.rewards[t] + gamma * next_values * (1.0 - self.dones[t]) - self.values[t]
-            self.advantages[t] = last_gae_lam = delta + gamma * gae_lambda * (1.0 - self.dones[t]) * last_gae_lam
-
-        self.returns = self.advantages + self.values
+        for t in reversed(range(num_steps)):
+            discounted_return = self.rewards[t] + gamma * discounted_return
+            self.returns[t] = discounted_return
+            self.advantages[t] = discounted_return - self.values[t]
 
     def get_batches(self, batch_size: int) -> Generator[dict[str, torch.Tensor], None, None]:
         """A generator that yields mini-batches from the buffer."""
-        num_samples: int = self.buffer_size * self.num_agents
+        num_steps = self.step
+        num_samples: int = num_steps * self.num_agents
 
-        states: np.ndarray = np.repeat(self.states, self.num_agents, axis=0)
-        obs: np.ndarray = self.observations.reshape(-1, self.obs_dim)
-        actions: np.ndarray = self.actions.reshape(-1, self.action_dim)  # Reshape to (N, action_dim)
-        pre_tanh_actions: np.ndarray = self.pre_tanh_actions.reshape(-1, self.action_dim)
-        log_probs: np.ndarray = self.log_probs.reshape(-1)
-        advantages: np.ndarray = self.advantages.reshape(-1)
-        returns: np.ndarray = self.returns.reshape(-1)
-        values: np.ndarray = self.values.reshape(-1)
+        states: np.ndarray = np.repeat(self.states[:num_steps], self.num_agents, axis=0)
+        obs: np.ndarray = self.observations[:num_steps].reshape(-1, self.obs_dim)
+        pre_tanh_actions: np.ndarray = self.pre_tanh_actions[:num_steps].reshape(-1, self.pre_tanh_actions.shape[-1])
+        log_probs: np.ndarray = self.log_probs[:num_steps].reshape(-1)
+        advantages: np.ndarray = self.advantages[:num_steps].reshape(-1)
+        returns: np.ndarray = self.returns[:num_steps].reshape(-1)
+        values: np.ndarray = self.values[:num_steps].reshape(-1)
+        active_masks: np.ndarray = self.active_masks[:num_steps].reshape(-1)
         # Create agent indices array to track which agent each sample belongs to
         # When we reshape (buffer_size, num_agents) to (buffer_size * num_agents,)
         # the pattern is: [agent0, agent1, ..., agentN, agent0, agent1, ..., agentN, ...]
-        agent_indices: np.ndarray = np.tile(np.arange(self.num_agents), self.buffer_size)
+        agent_indices: np.ndarray = np.tile(np.arange(self.num_agents), num_steps)
 
         indices: np.ndarray = np.random.permutation(num_samples)
         
         # Pre-convert all data to tensors on GPU for faster batching
         states_tensor: torch.Tensor = torch.from_numpy(states).to(self.device, non_blocking=True)
         obs_tensor: torch.Tensor = torch.from_numpy(obs).to(self.device, non_blocking=True)
-        actions_tensor: torch.Tensor = torch.from_numpy(actions).to(self.device, non_blocking=True)
         pre_tanh_actions_tensor: torch.Tensor = torch.from_numpy(pre_tanh_actions).to(self.device, non_blocking=True)
         log_probs_tensor: torch.Tensor = torch.from_numpy(log_probs).to(self.device, non_blocking=True)
         advantages_tensor: torch.Tensor = torch.from_numpy(advantages).to(self.device, non_blocking=True)
         returns_tensor: torch.Tensor = torch.from_numpy(returns).to(self.device, non_blocking=True)
         values_tensor: torch.Tensor = torch.from_numpy(values).to(self.device, non_blocking=True)
+        active_masks_tensor: torch.Tensor = torch.from_numpy(active_masks).to(self.device, non_blocking=True)
         agent_indices_tensor: torch.Tensor = torch.from_numpy(agent_indices).to(self.device, non_blocking=True)
 
         for start in range(0, num_samples, batch_size):
@@ -147,12 +139,12 @@ class RolloutBuffer:
             yield {
                 "states": states_tensor[batch_idx_tensor],
                 "obs": obs_tensor[batch_idx_tensor],
-                "actions": actions_tensor[batch_idx_tensor],
                 "pre_tanh_actions": pre_tanh_actions_tensor[batch_idx_tensor],
                 "old_log_probs": log_probs_tensor[batch_idx_tensor],
                 "advantages": advantages_tensor[batch_idx_tensor],
                 "returns": returns_tensor[batch_idx_tensor],
                 "old_values": values_tensor[batch_idx_tensor],
+                "active_mask": active_masks_tensor[batch_idx_tensor],
                 "agent_indices": agent_indices_tensor[batch_idx_tensor],
             }
 

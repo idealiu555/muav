@@ -4,7 +4,7 @@ from marl_models.utils import get_model, load_step_count
 from train import train_on_policy, train_off_policy, train_random
 from test import test_model
 from utils.logger import Logger
-from utils.plot_logs import generate_plots
+from utils.plot_logs import generate_plots_if_available
 import config
 import torch
 import numpy as np
@@ -51,7 +51,7 @@ def start_training(args: argparse.Namespace):
 
     print("✅ Training Completed!\n")
     print("📊 Generating plots...")
-    generate_plots(f"train_logs/log_data_{timestamp}.json", f"train_plots/{model_name}/", "train", timestamp)
+    generate_plots_if_available(logger.json_file_path, f"train_plots/{model_name}/", "train", timestamp)
 
 
 def start_testing(args: argparse.Namespace):
@@ -72,7 +72,7 @@ def start_testing(args: argparse.Namespace):
 
     print("✅ Testing Completed!\n")
     print("📊 Generating plots...")
-    generate_plots(f"test_logs/log_data_{timestamp}.json", f"test_plots/{config.MODEL}/", "test", timestamp)
+    generate_plots_if_available(logger.json_file_path, f"test_plots/{config.MODEL}/", "test", timestamp)
 
 
 if __name__ == "__main__":

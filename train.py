@@ -4,13 +4,19 @@ from marl_models.utils import save_models
 from environment.env import Env
 from utils.logger import Logger, Log
 from utils.plot_snapshots import plot_snapshot
-from utils.plot_logs import generate_plots
+from utils.plot_logs import generate_plots_if_available
 
 # from utils.plot_snapshots import update_trajectories, reset_trajectories  # trajectory tracking, comment if not needed
 import config
 import torch
 import numpy as np
 import time
+
+
+def _append_active_actions(action_accumulator: list[np.ndarray], actions: np.ndarray, active_mask: np.ndarray) -> None:
+    active_actions = actions[active_mask.astype(bool, copy=False)]
+    if active_actions.size > 0:
+        action_accumulator.append(active_actions)
 
 
 def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: int) -> None:
@@ -53,15 +59,20 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
 
             obs_arr: np.ndarray = np.array(obs)
             actions, log_probs, values, pre_tanh_actions = model.get_action_and_value(obs_arr, state)
-            
-            # Action statistics
-            action_accumulator.append(actions.flatten())
 
             next_obs, rewards, (total_latency, total_energy, jfi, total_rate, reward_stats, step_collisions, step_boundaries), _step_info = env.step(actions)
+            _append_active_actions(action_accumulator, actions, _step_info["active_mask"])
             # update_trajectories(env)  # tracking code, comment if not needed
             next_state: np.ndarray = np.concatenate(next_obs, axis=0)
-            episode_done: bool = step == config.STEPS_PER_EPISODE
-            buffer.add(state, obs_arr, actions, pre_tanh_actions, log_probs, rewards, done=episode_done, values=values)
+            buffer.add(
+                state,
+                obs_arr,
+                pre_tanh_actions,
+                log_probs,
+                rewards,
+                values,
+                _step_info["active_mask"],
+            )
 
             obs = next_obs
             state = next_state
@@ -79,8 +90,7 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
                     training_stats_accumulator[key] = []
                 training_stats_accumulator[key].append(value)
 
-        last_values: np.ndarray = np.zeros(config.NUM_UAVS, dtype=np.float32)
-        buffer.compute_returns_and_advantages(last_values, config.DISCOUNT_FACTOR, config.PPO_GAE_LAMBDA)
+        buffer.compute_returns_and_advantages(config.DISCOUNT_FACTOR)
 
         for _ in range(config.PPO_EPOCHS):
             for batch in buffer.get_batches(config.PPO_BATCH_SIZE):
@@ -116,7 +126,7 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
                         averaged_stats[key] = float(np.mean(values))
                 # Add action statistics
                 if action_accumulator:
-                    all_actions = np.array(action_accumulator)
+                    all_actions = np.concatenate(action_accumulator, axis=0)
                     averaged_stats["action_mean"] = float(np.mean(all_actions))
                     averaged_stats["action_std"] = float(np.std(all_actions))
             
@@ -126,7 +136,7 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
             training_stats_accumulator.clear()
             action_accumulator.clear()
         if update % 100 == 0:
-            generate_plots(f"{logger.log_dir}/log_data_{logger.timestamp}.json", f"train_plots/{config.MODEL}/", "train", logger.timestamp)
+            generate_plots_if_available(logger.json_file_path, f"train_plots/{config.MODEL}/", "train", logger.timestamp)
         if update % save_freq == 0 and update < num_updates:
             total_steps = update * config.PPO_ROLLOUT_LENGTH
             save_models(model, update, "update", logger.timestamp, total_steps=total_steps)
@@ -172,12 +182,10 @@ def train_off_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: i
                     actions[active_indices] = np.random.uniform(-1, 1, size=(len(active_indices), config.ACTION_DIM))
             else:
                 actions = model.select_actions(obs, exploration=True)
-            
-            # Collect action statistics (only after random exploration phase)
-            if total_step_count > config.INITIAL_RANDOM_STEPS:
-                action_accumulator.append(actions.flatten())
 
             next_obs, rewards, (total_latency, total_energy, jfi, total_rate, reward_stats, step_collisions, step_boundaries), step_info = env.step(actions)
+            if total_step_count > config.INITIAL_RANDOM_STEPS:
+                _append_active_actions(action_accumulator, actions, step_info["active_mask"])
             # update_trajectories(env)  # tracking code, comment if not needed
             
             for key, value in reward_stats.items():
@@ -238,7 +246,7 @@ def train_off_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: i
                         averaged_stats[key] = float(np.mean(values))
                 # Add action statistics
                 if action_accumulator:
-                    all_actions = np.array(action_accumulator)
+                    all_actions = np.concatenate(action_accumulator, axis=0)
                     averaged_stats["action_mean"] = float(np.mean(all_actions))
                     averaged_stats["action_std"] = float(np.std(all_actions))
             else:
@@ -255,7 +263,7 @@ def train_off_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: i
             update_count = 0
             action_accumulator.clear()
         if episode % 100 == 0:
-            generate_plots(f"{logger.log_dir}/log_data_{logger.timestamp}.json", f"train_plots/{config.MODEL}/", "train", logger.timestamp)
+            generate_plots_if_available(logger.json_file_path, f"train_plots/{config.MODEL}/", "train", logger.timestamp)
         if episode % save_freq == 0 and episode < num_episodes:
             save_models(model, episode, "episode", logger.timestamp, total_steps=total_step_count)
 
@@ -301,4 +309,4 @@ def train_random(env: Env, model: MARLModel, logger: Logger, num_episodes: int) 
             logger.log_metrics(episode, episode_log, config.LOG_FREQ, elapsed_time, "episode")
             episode_log.keep_recent(config.LOG_FREQ * 2)  # Keep 2x window for safety
         if episode % 100 == 0:
-            generate_plots(f"{logger.log_dir}/log_data_{logger.timestamp}.json", f"train_plots/{config.MODEL}/", "train", logger.timestamp)
+            generate_plots_if_available(logger.json_file_path, f"train_plots/{config.MODEL}/", "train", logger.timestamp)
