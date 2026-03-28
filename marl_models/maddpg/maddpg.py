@@ -78,12 +78,14 @@ class MADDPG(MARLModel):
         rewards_batch = batch["rewards"]
         next_obs_batch = batch["next_obs"]
         active_mask_batch = batch["active_mask"]
+        next_action_mask_batch = batch["next_action_mask"]
         bootstrap_mask_batch = batch["bootstrap_mask"]
         obs_tensor: torch.Tensor = torch.as_tensor(obs_batch, dtype=torch.float32, device=self.device)
         actions_tensor: torch.Tensor = torch.as_tensor(actions_batch, dtype=torch.float32, device=self.device)
         rewards_tensor: torch.Tensor = torch.as_tensor(rewards_batch, dtype=torch.float32, device=self.device)
         next_obs_tensor: torch.Tensor = torch.as_tensor(next_obs_batch, dtype=torch.float32, device=self.device)
         active_mask_tensor: torch.Tensor = torch.as_tensor(active_mask_batch, dtype=torch.float32, device=self.device)
+        next_action_mask_tensor: torch.Tensor = torch.as_tensor(next_action_mask_batch, dtype=torch.float32, device=self.device)
         bootstrap_mask_tensor: torch.Tensor = torch.as_tensor(bootstrap_mask_batch, dtype=torch.float32, device=self.device)
 
         batch_size: int = obs_tensor.shape[0]  # Get batch size from the data
@@ -97,7 +99,8 @@ class MADDPG(MARLModel):
         total_actor_grad_norm: float = 0.0
         total_critic_grad_norm: float = 0.0
         q_values: list[float] = []
-        updated_agents: int = 0
+        actor_updates: int = 0
+        critic_updates: int = 0
         
         # Pre-compute critic-side observation encodings once per batch.
         # This is used by both attention and no-attention critics.
@@ -112,7 +115,7 @@ class MADDPG(MARLModel):
             ]
             # Pre-compute target actions for all agents (used in critic updates)
             next_actions: list[torch.Tensor] = [
-                self.target_actors[i](next_obs_tensor[:, i, :]) * bootstrap_mask_tensor[:, i:i + 1]
+                self.target_actors[i](next_obs_tensor[:, i, :]) * next_action_mask_tensor[:, i:i + 1]
                 for i in range(self.num_agents)
             ]
             next_actions_tensor: torch.Tensor = torch.cat(next_actions, dim=1)
@@ -124,14 +127,16 @@ class MADDPG(MARLModel):
         if config.USE_ATTENTION:
             self.shared_encoder_optimizer.zero_grad(set_to_none=True)
 
-        active_agent_indices = [
+        critic_agent_indices = [
             agent_idx for agent_idx in range(self.num_agents)
             if active_mask_tensor[:, agent_idx].sum().item() > 0.0
         ]
 
-        for update_idx, agent_idx in enumerate(active_agent_indices):
+        for update_idx, agent_idx in enumerate(critic_agent_indices):
             valid_mask: torch.Tensor = active_mask_tensor[:, agent_idx:agent_idx + 1]
-            is_last_agent = (update_idx == len(active_agent_indices) - 1)
+            is_last_agent = (update_idx == len(critic_agent_indices) - 1)
+            if valid_mask.sum().item() == 0.0:
+                continue
             
             # Update Critic
             with torch.no_grad():
@@ -161,6 +166,11 @@ class MADDPG(MARLModel):
             else:
                 critic_grad_norm = torch.nn.utils.clip_grad_norm_(self.critics[agent_idx].parameters(), config.MAX_GRAD_NORM)
             self.critic_optimizers[agent_idx].step()  # Only updates MLP parameters
+
+            total_critic_loss += critic_loss.item()
+            total_critic_grad_norm += float(critic_grad_norm)
+            q_values.extend(current_q_value[valid_mask.bool()].detach().cpu().numpy().flatten().tolist())
+            critic_updates += 1
 
             # Update Actor
             # Use pre-computed actions for other agents, recompute only current agent's action with gradients
@@ -193,17 +203,14 @@ class MADDPG(MARLModel):
             
             # Collect statistics
             total_actor_loss += actor_loss.item()
-            total_critic_loss += critic_loss.item()
             total_actor_grad_norm += float(actor_grad_norm)
-            total_critic_grad_norm += float(critic_grad_norm)
-            q_values.extend(current_q_value[valid_mask.bool()].detach().cpu().numpy().flatten().tolist())
-            updated_agents += 1
+            actor_updates += 1
         
         # Step shared encoder optimizer after all gradients have accumulated
         if config.USE_ATTENTION:
             # Scale gradients by the number of agents that actually contributed updates.
             with torch.no_grad():
-                encoder_grad_scale = max(1, updated_agents)
+                encoder_grad_scale = max(1, critic_updates)
                 for param in self.shared_encoder.parameters():
                     if param.grad is not None:
                         param.grad.div_(encoder_grad_scale)
@@ -230,12 +237,13 @@ class MADDPG(MARLModel):
                 soft_update(self.target_critics[agent_idx], self.critics[agent_idx], config.UPDATE_FACTOR)
         
         # Return averaged statistics
-        normalizer = max(1, updated_agents)
+        actor_normalizer = max(1, actor_updates)
+        critic_normalizer = max(1, critic_updates)
         return {
-            "actor_loss": total_actor_loss / normalizer,
-            "critic_loss": total_critic_loss / normalizer,
-            "actor_grad_norm": total_actor_grad_norm / normalizer,
-            "critic_grad_norm": total_critic_grad_norm / normalizer,
+            "actor_loss": total_actor_loss / actor_normalizer,
+            "critic_loss": total_critic_loss / critic_normalizer,
+            "actor_grad_norm": total_actor_grad_norm / actor_normalizer,
+            "critic_grad_norm": total_critic_grad_norm / critic_normalizer,
             "q_value_mean": float(np.mean(q_values)) if q_values else 0.0,
             "q_value_std": float(np.std(q_values)) if q_values else 0.0,
             "noise_scale": self.noise[0].scale,  # All agents share same noise scale

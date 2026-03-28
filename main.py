@@ -1,6 +1,6 @@
 from marl_models.base_model import MARLModel
 from environment.env import Env
-from marl_models.utils import get_model, load_step_count
+from marl_models.utils import get_model, load_training_state
 from train import train_on_policy, train_off_policy, train_random
 from test import test_model
 from utils.logger import Logger
@@ -19,11 +19,13 @@ def start_training(args: argparse.Namespace):
     print(f"\n🚀 Training started at {timestamp} for {args.num_episodes} episodes\n")
     logger: Logger = Logger("train_logs", timestamp)
     resume_training: bool = args.resume_path is not None
+    training_state: dict[str, int] = {"total_steps": 0, "completed_updates": 0}
     if resume_training:
         if args.config_path is None:
             raise ValueError("If --resume_path is provided, --config_path must also be provided.")
         else:
             logger.load_configs(args.config_path)  # Resume training with old config
+        training_state = load_training_state(args.resume_path)
     else:  # Fresh training
         if args.config_path is not None:
             warnings.warn("--config_path is ignored during training unless --resume_path is also provided.")
@@ -34,18 +36,27 @@ def start_training(args: argparse.Namespace):
     env: Env = Env()
     model_name: str = config.MODEL.lower()
     model: MARLModel = get_model(model_name)
+    if resume_training and model_name == "mappo" and training_state["total_steps"] > 0 and training_state["completed_updates"] <= 0:
+        raise ValueError(
+            "MAPPO resume checkpoints must include 'completed_updates' in training_state.json."
+        )
 
-    total_step_count: int = 0  # for off policy models
     if resume_training:
         model.load(args.resume_path)
-        total_step_count = load_step_count(args.resume_path)
         print(f"📥 Models loaded successfully from {args.resume_path}")
         print(f"📂 Resumed training from: {args.resume_path}\n")
 
     if model_name in ["maddpg", "matd3", "masac"]:
-        train_off_policy(env, model, logger, args.num_episodes, total_step_count)
+        train_off_policy(env, model, logger, args.num_episodes, training_state["total_steps"])
     elif model_name == "mappo":
-        train_on_policy(env, model, logger, args.num_episodes)
+        train_on_policy(
+            env,
+            model,
+            logger,
+            args.num_episodes,
+            completed_updates=training_state["completed_updates"],
+            total_step_count=training_state["total_steps"],
+        )
     else:  # "random"
         train_random(env, model, logger, args.num_episodes)
 

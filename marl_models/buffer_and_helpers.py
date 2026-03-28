@@ -17,9 +17,10 @@ class ReplayBuffer:
         rewards: list[float],
         next_obs: list[np.ndarray],
         active_mask: np.ndarray,
+        next_action_mask: np.ndarray,
         bootstrap_mask: np.ndarray,
     ) -> None:
-        """Store one transition tuple with explicit agent activity/bootstrap masks."""
+        """Store one transition tuple with separate action and episode bootstrap masks."""
         obs_arr: np.ndarray = np.array(obs)
         next_obs_arr: np.ndarray = np.array(next_obs)
         rewards_arr: np.ndarray = np.array(rewards)
@@ -30,6 +31,7 @@ class ReplayBuffer:
                 "rewards": rewards_arr,
                 "next_obs": next_obs_arr,
                 "active_mask": active_mask.astype(np.float32, copy=False),
+                "next_action_mask": next_action_mask.astype(np.float32, copy=False),
                 "bootstrap_mask": bootstrap_mask.astype(np.float32, copy=False),
             }
         )
@@ -61,6 +63,7 @@ class RolloutBuffer:
         self.rewards: np.ndarray = np.zeros((buffer_size, num_agents), dtype=np.float32)
         self.values: np.ndarray = np.zeros((buffer_size, num_agents), dtype=np.float32)
         self.active_masks: np.ndarray = np.zeros((buffer_size, num_agents), dtype=np.float32)
+        self.bootstrap_masks: np.ndarray = np.zeros((buffer_size, num_agents), dtype=np.float32)
 
         # For on-policy return/advantage calculation
         self.advantages: np.ndarray = np.zeros((buffer_size, num_agents), dtype=np.float32)
@@ -77,6 +80,7 @@ class RolloutBuffer:
         rewards: list[float],
         values: np.ndarray,
         active_mask: np.ndarray,
+        bootstrap_mask: np.ndarray,
     ) -> None:
         if self.step >= self.buffer_size:
             raise ValueError("Rollout buffer overflow")
@@ -87,22 +91,20 @@ class RolloutBuffer:
         self.rewards[self.step] = np.array(rewards)
         self.values[self.step] = values
         self.active_masks[self.step] = active_mask.astype(np.float32, copy=False)
+        self.bootstrap_masks[self.step] = bootstrap_mask.astype(np.float32, copy=False)
 
         self.step += 1
 
     def compute_returns_and_advantages(self, gamma: float, gae_lambda: float) -> None:
-        """Compute finite-horizon GAE targets for the collected rollout."""
+        """Compute GAE targets with per-agent death-aware bootstrap masking."""
         num_steps = self.step
         last_gae_lam: np.ndarray = np.zeros(self.num_agents, dtype=np.float32)
 
         for t in reversed(range(num_steps)):
-            if t == num_steps - 1:
-                next_values: np.ndarray = np.zeros(self.num_agents, dtype=np.float32)
-            else:
-                next_values = self.values[t + 1]
-
-            delta: np.ndarray = self.rewards[t] + gamma * next_values - self.values[t]
-            last_gae_lam = delta + gamma * gae_lambda * last_gae_lam
+            bootstrap_mask: np.ndarray = self.bootstrap_masks[t]
+            next_values: np.ndarray = np.zeros(self.num_agents, dtype=np.float32) if t == num_steps - 1 else self.values[t + 1]
+            delta: np.ndarray = self.rewards[t] + gamma * bootstrap_mask * next_values - self.values[t]
+            last_gae_lam = delta + gamma * gae_lambda * bootstrap_mask * last_gae_lam
             self.advantages[t] = last_gae_lam
 
         self.returns[:num_steps] = self.advantages[:num_steps] + self.values[:num_steps]

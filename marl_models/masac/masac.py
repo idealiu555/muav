@@ -63,12 +63,14 @@ class MASAC(MARLModel):
         rewards_batch = batch["rewards"]
         next_obs_batch = batch["next_obs"]
         active_mask_batch = batch["active_mask"]
+        next_action_mask_batch = batch["next_action_mask"]
         bootstrap_mask_batch = batch["bootstrap_mask"]
         obs_tensor = torch.as_tensor(obs_batch, dtype=torch.float32, device=self.device)
         actions_tensor = torch.as_tensor(actions_batch, dtype=torch.float32, device=self.device)
         rewards_tensor = torch.as_tensor(rewards_batch, dtype=torch.float32, device=self.device)
         next_obs_tensor = torch.as_tensor(next_obs_batch, dtype=torch.float32, device=self.device)
         active_mask_tensor = torch.as_tensor(active_mask_batch, dtype=torch.float32, device=self.device)
+        next_action_mask_tensor = torch.as_tensor(next_action_mask_batch, dtype=torch.float32, device=self.device)
         bootstrap_mask_tensor = torch.as_tensor(bootstrap_mask_batch, dtype=torch.float32, device=self.device)
 
         batch_size: int = obs_tensor.shape[0]
@@ -83,7 +85,8 @@ class MASAC(MARLModel):
         total_critic_grad_norm: float = 0.0
         alphas: list[float] = []
         q_values: list[float] = []
-        updated_agents: int = 0
+        actor_updates: int = 0
+        critic_updates: int = 0
 
         alpha_tensors: list[torch.Tensor] = [log_alpha.exp() for log_alpha in self.log_alphas]
         alphas = [alpha.item() for alpha in alpha_tensors]
@@ -94,7 +97,7 @@ class MASAC(MARLModel):
             next_log_probs_list: list[torch.Tensor] = []
             for i in range(self.num_agents):
                 next_action, next_log_prob = self.actors[i].sample(next_obs_tensor[:, i, :])
-                next_actions_list.append(next_action * bootstrap_mask_tensor[:, i:i + 1])
+                next_actions_list.append(next_action * next_action_mask_tensor[:, i:i + 1])
                 next_log_probs_list.append(next_log_prob)
 
             next_actions_tensor: torch.Tensor = torch.cat(next_actions_list, dim=1)
@@ -139,6 +142,7 @@ class MASAC(MARLModel):
             total_critic_loss += combined_critic_loss.item()
             total_critic_grad_norm += float(max(c1_grad, c2_grad))
             q_values.extend(current_q1[valid_mask.squeeze(1).bool()].detach().cpu().numpy().flatten().tolist())
+            critic_updates += 1
 
             # Update Actor and Alpha
             pred_actions_list: list[torch.Tensor] = []
@@ -187,20 +191,21 @@ class MASAC(MARLModel):
             self.alpha_optimizers[agent_idx].step()
 
             total_alpha_loss += alpha_loss.item()
-            updated_agents += 1
+            actor_updates += 1
 
             # Soft update target networks
             soft_update(self.target_critics_1[agent_idx], self.critics_1[agent_idx], config.UPDATE_FACTOR)
             soft_update(self.target_critics_2[agent_idx], self.critics_2[agent_idx], config.UPDATE_FACTOR)
 
-        normalizer = max(1, updated_agents)
+        actor_normalizer = max(1, actor_updates)
+        critic_normalizer = max(1, critic_updates)
         return {
-            "actor_loss": total_actor_loss / normalizer,
-            "critic_loss": total_critic_loss / normalizer,
-            "alpha_loss": total_alpha_loss / normalizer,
+            "actor_loss": total_actor_loss / actor_normalizer,
+            "critic_loss": total_critic_loss / critic_normalizer,
+            "alpha_loss": total_alpha_loss / actor_normalizer,
             "alpha_mean": float(np.mean(alphas)),
-            "actor_grad_norm": total_actor_grad_norm / normalizer,
-            "critic_grad_norm": total_critic_grad_norm / normalizer,
+            "actor_grad_norm": total_actor_grad_norm / actor_normalizer,
+            "critic_grad_norm": total_critic_grad_norm / critic_normalizer,
             "q_value_mean": float(np.mean(q_values)) if q_values else 0.0,
         }
 

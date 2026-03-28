@@ -7,6 +7,7 @@ from marl_models.random_baseline.random_model import RandomModel
 import config
 import torch
 import os
+import json
 
 
 def init_gpu_optimizations() -> None:
@@ -54,7 +55,15 @@ def get_model(model_name: str) -> MARLModel:
         raise ValueError(f"Unknown model type: {model_name}. Supported types: maddpg, matd3, mappo, masac, random")
 
 
-def save_models(model: MARLModel, progress_step: int, name: str, timestamp: str, final: bool = False, total_steps: int = 0):
+def save_models(
+    model: MARLModel,
+    progress_step: int,
+    name: str,
+    timestamp: str,
+    final: bool = False,
+    total_steps: int = 0,
+    completed_updates: int | None = None,
+):
     save_dir: str = f"saved_models/{model.model_name}_{timestamp}"
     if final:
         save_dir = f"{save_dir}/final"
@@ -65,10 +74,12 @@ def save_models(model: MARLModel, progress_step: int, name: str, timestamp: str,
 
     model.save(save_dir)
 
-    if total_steps > 0:
-        step_count_path: str = os.path.join(save_dir, "total_steps.txt")
-        with open(step_count_path, "w") as f:
-            f.write(str(total_steps))
+    training_state: dict[str, int] = {"total_steps": int(total_steps)}
+    if completed_updates is not None:
+        training_state["completed_updates"] = int(completed_updates)
+    training_state_path: str = os.path.join(save_dir, "training_state.json")
+    with open(training_state_path, "w", encoding="utf-8") as f:
+        json.dump(training_state, f, indent=4)
 
     if final:
         print(f"📁 Final models saved in: {save_dir}\n")
@@ -76,9 +87,18 @@ def save_models(model: MARLModel, progress_step: int, name: str, timestamp: str,
         print(f"📁 Models saved for {name.lower()} {progress_step} in: {save_dir}\n")
 
 
-def load_step_count(directory: str) -> int:
-    step_count_path: str = os.path.join(directory, "total_steps.txt")
-    if os.path.exists(step_count_path):
-        with open(step_count_path, "r") as f:
-            return int(f.read().strip())
-    return 0
+def load_training_state(directory: str) -> dict[str, int]:
+    training_state_path: str = os.path.join(directory, "training_state.json")
+    if not os.path.exists(training_state_path):
+        raise FileNotFoundError(f"❌ Training state file not found: {training_state_path}")
+
+    with open(training_state_path, "r", encoding="utf-8") as f:
+        training_state = json.load(f)
+
+    if "total_steps" not in training_state:
+        raise ValueError(f"❌ Training state is missing 'total_steps': {training_state_path}")
+
+    return {
+        "total_steps": int(training_state["total_steps"]),
+        "completed_updates": int(training_state.get("completed_updates", 0)),
+    }

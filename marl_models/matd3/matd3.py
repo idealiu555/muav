@@ -62,12 +62,14 @@ class MATD3(MARLModel):
         rewards_batch = batch["rewards"]
         next_obs_batch = batch["next_obs"]
         active_mask_batch = batch["active_mask"]
+        next_action_mask_batch = batch["next_action_mask"]
         bootstrap_mask_batch = batch["bootstrap_mask"]
         obs_tensor: torch.Tensor = torch.as_tensor(obs_batch, dtype=torch.float32, device=self.device)
         actions_tensor: torch.Tensor = torch.as_tensor(actions_batch, dtype=torch.float32, device=self.device)
         rewards_tensor: torch.Tensor = torch.as_tensor(rewards_batch, dtype=torch.float32, device=self.device)
         next_obs_tensor: torch.Tensor = torch.as_tensor(next_obs_batch, dtype=torch.float32, device=self.device)
         active_mask_tensor: torch.Tensor = torch.as_tensor(active_mask_batch, dtype=torch.float32, device=self.device)
+        next_action_mask_tensor: torch.Tensor = torch.as_tensor(next_action_mask_batch, dtype=torch.float32, device=self.device)
         bootstrap_mask_tensor: torch.Tensor = torch.as_tensor(bootstrap_mask_batch, dtype=torch.float32, device=self.device)
 
         batch_size: int = obs_tensor.shape[0]
@@ -95,7 +97,7 @@ class MATD3(MARLModel):
                     next_action_i: torch.Tensor = self.target_actors[i](next_obs_tensor[:, i, :])
                     noise: torch.Tensor = torch.randn_like(next_action_i) * config.TARGET_POLICY_NOISE
                     clipped_noise: torch.Tensor = torch.clamp(noise, -config.NOISE_CLIP, config.NOISE_CLIP)
-                    masked_next_action = torch.clamp(next_action_i + clipped_noise, -1.0, 1.0) * bootstrap_mask_tensor[:, i:i + 1]
+                    masked_next_action = torch.clamp(next_action_i + clipped_noise, -1.0, 1.0) * next_action_mask_tensor[:, i:i + 1]
                     next_actions.append(masked_next_action)
 
                 next_actions_tensor: torch.Tensor = torch.cat(next_actions, dim=1)

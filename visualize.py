@@ -67,10 +67,14 @@ def main() -> None:
     print("Starting simulation with random actions...")
     for t in range(config.STEPS_PER_EPISODE):
         actions: np.ndarray = generate_random_actions(config.NUM_UAVS)
-        env.step(actions)
-        if t % 50 == 0:
+        _, _, _, step_info = env.step(actions)
+        terminated: bool = bool(step_info["terminated"])
+        if t % 50 == 0 or terminated:
             plot_snapshot(env, t, vis_dir)
             print(f"Saved frame for time step {t}")
+        if terminated:
+            print(f"Simulation terminated early at step {t} ({step_info['termination_reason']}).")
+            break
     print(f"\nSimulation finished. Visualization frames are saved in the '{vis_dir}' directory.")
 
 

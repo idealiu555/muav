@@ -47,7 +47,10 @@ FAIRNESS_WINDOW_SIZE: int = 100  # 公平性计算的滑动窗口大小（最近
 UNSAFE_UAV_DISTANCE: float = 50.0
 COLLISION_DISTANCE: float = 5.0
 UNSAFE_PROXIMITY_PENALTY: float = 6.0
-COLLISION_FAILURE_PENALTY: float = 20.0
+# Collision failure penalty = base + early_scale * remaining_episode_ratio.
+COLLISION_PENALTY_BASE: float = 20.0
+COLLISION_PENALTY_EARLY_SCALE: float = 30.0
+FLEET_FAILURE_PENALTY_MULTIPLIER: float = 1.0
 BOUNDARY_PENALTY: float = 2.5
 NON_SERVED_LATENCY_PENALTY: float = 60.0  # penalty in latency for non-served requests
 # IMPORTANT : Reconfigurable, should try for various values including : NUM_UAVS - 1 and NUM_UES
@@ -118,17 +121,23 @@ BEAM_OFFSET_RANGE: float = 30.0          # offset模式下的最大偏移范围 
 
 # Model Parameters
 
-# Reward weights for multi-objective optimization
-# 使用动态归一化后，各分量量级一致，权重直接表达优先级
-# 初始设为 1:1:1:1，可根据训练结果调整
-ALPHA_1: float = 1.05  # weightage for latency (penalty)
-ALPHA_2: float = 0.8  # weightage for energy (penalty)
-ALPHA_3: float = 1.2  # weightage for fairness/JFI (reward)
-ALPHA_RATE: float = 1.0  # weightage for system throughput (reward)
-REWARD_SCALING_FACTOR: float = 0.12  # scaling factor for rewards (归一化后保持原量级)
-LATENCY_REWARD_SCALE: float = NUM_UES * TIME_SLOT_DURATION
-ENERGY_REWARD_SCALE: float = NUM_UAVS * POWER_HOVER * TIME_SLOT_DURATION
-RATE_REWARD_SCALE: float = 1e8
+# Reward shaping parameters
+# 共享项仅保留系统级目标；可归因目标使用本地项。
+REWARD_SCALING_FACTOR: float = 0.12
+REWARD_FAIRNESS_TARGET: float = 0.6
+REWARD_FAIRNESS_GAIN: float = 5.0
+REWARD_FAIRNESS_CLIP: float = 2.0
+REWARD_FAIRNESS_SHARED_COEF: float = 1.2
+REWARD_RATE_SHARED_COEF: float = 0.5
+REWARD_RATE_LOCAL_COEF: float = 0.5
+REWARD_LATENCY_SHARED_COEF: float = 0.525
+REWARD_LATENCY_LOCAL_COEF: float = 0.525
+REWARD_ENERGY_LOCAL_COEF: float = 0.8
+REWARD_GLOBAL_LATENCY_SCALE: float = NUM_UES * TIME_SLOT_DURATION
+REWARD_LOCAL_LATENCY_SCALE: float = TIME_SLOT_DURATION
+REWARD_GLOBAL_RATE_SCALE: float = 1e8
+REWARD_LOCAL_RATE_SCALE: float = REWARD_GLOBAL_RATE_SCALE / NUM_UAVS
+REWARD_LOCAL_ENERGY_SCALE: float = POWER_HOVER * TIME_SLOT_DURATION
 
 # UE state: pos(3) + file_id(1) + cache_hit(1) = 5
 UE_STATE_DIM: int = 5
@@ -184,7 +193,9 @@ PPO_EPOCHS: int = 10  # number of epochs to run on the collected rollout data
 PPO_BATCH_SIZE: int = 512  # size of mini-batches to use during the update step (increased from 64 for better GPU utilization)
 PPO_CLIP_EPS: float = 0.2  # clipping parameter (epsilon) for the PPO surrogate objective
 PPO_VALUE_CLIP_EPS: float = 0.2  # clipping parameter for value function (can be same or different from policy clip)
-PPO_ENTROPY_COEF: float = 0.01  # coefficient for the entropy bonus to encourage exploration
+PPO_ENTROPY_COEF: float = 0.01  # initial entropy bonus coefficient for PPO exploration
+PPO_FINAL_ENTROPY_COEF: float = 0.001  # final entropy bonus coefficient after linear annealing
+PPO_ENTROPY_ANNEAL_UPDATES: int = 1000  # number of MAPPO updates over which entropy anneals to the final value
 PPO_GAE_LAMBDA: float = 0.95  # GAE lambda for lower-variance advantage estimation
 PPO_MAX_LOG_RATIO: float = 10.0  # clip log-ratio before exp to avoid numerical spikes
 PPO_USE_SQUASHED_ENTROPY: bool = False  # False: use lower-variance pre-tanh entropy proxy

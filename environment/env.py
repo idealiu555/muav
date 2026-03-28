@@ -5,6 +5,17 @@ import numpy as np
 # 基于强化学习框架，模拟多无人机（UAV）空中基站通信保障环境，管理 UAV、用户设备（UE）和宏基站（MBS）的状态、动作和奖励。
 
 
+def _masked_mean_std(values: np.ndarray, active_mask: np.ndarray) -> tuple[float, float]:
+    active_values = values[active_mask.astype(bool, copy=False)]
+    if active_values.size == 0:
+        return 0.0, 0.0
+    return float(np.mean(active_values)), float(np.std(active_values))
+
+
+def _scaled_log1p(values: float | np.ndarray, scale: float) -> float | np.ndarray:
+    return np.log1p(values / (scale + float(config.EPSILON)))
+
+
 def _min_distance_on_interval(rel_pos: np.ndarray, rel_vel: np.ndarray, duration: float) -> float:
     """Return the minimum distance for synchronous linear relative motion on [0, duration]."""
     if duration <= 0.0:
@@ -60,6 +71,7 @@ class Env:
         self._ues: list[UE] = [UE(i) for i in range(config.NUM_UES)]
         self._uavs: list[UAV] = [UAV(i) for i in range(config.NUM_UAVS)]
         self._time_step: int = 0
+        self._terminated: bool = False
 
     @property
     def uavs(self) -> list[UAV]:
@@ -74,13 +86,17 @@ class Env:
         self._ues = [UE(i) for i in range(config.NUM_UES)]
         self._uavs = [UAV(i) for i in range(config.NUM_UAVS)]
         self._time_step = 0
+        self._terminated = False
         self._prepare_for_next_step()
         return self._get_obs()
 
     def step(
         self, actions: np.ndarray
-    ) -> tuple[list[np.ndarray], list[float], tuple[float, float, float, float, dict, int, int], dict[str, np.ndarray]]:
+    ) -> tuple[list[np.ndarray], list[float], tuple[float, float, float, float, dict, int, int], dict[str, np.ndarray | bool | str | None]]:
         """Execute one time step of the simulation."""
+        if self._terminated:
+            raise RuntimeError("Episode has terminated. Call reset() before stepping again.")
+
         self._time_step += 1
         active_mask = np.array([1.0 if uav.active else 0.0 for uav in self._uavs], dtype=np.float32)
 
@@ -113,30 +129,41 @@ class Env:
         for uav in self._uavs:
             uav.update_energy_consumption()
 
-        rewards, metrics = self._get_rewards_and_metrics()
+        next_active_mask = np.array([1.0 if uav.active else 0.0 for uav in self._uavs], dtype=np.float32)
+        rewards, metrics = self._get_rewards_and_metrics(active_mask, next_active_mask)
         self._clear_failed_uav_peer_backlogs()
-
-        if self._time_step % config.T_CACHE_UPDATE_INTERVAL == 0:
-            for uav in self._uavs:
-                uav.gdsf_cache_update()
-
-        # 4. Prepare for next time slot
-        for ue in self._ues:
-            ue.update_position()
 
         # Count violations before resetting logic checks
         step_collisions = sum(1 for uav in self._uavs if uav.collision_violation)
         step_boundaries = sum(1 for uav in self._uavs if uav.boundary_violation)
-        next_active_mask = np.array([1.0 if uav.active else 0.0 for uav in self._uavs], dtype=np.float32)
+        fleet_failed: bool = bool(active_mask.sum() > 0.0 and next_active_mask.sum() == 0.0)
+        terminated: bool = fleet_failed
+        termination_reason: str | None = "fleet_failure" if fleet_failed else None
 
-        for uav in self._uavs:
-            uav.reset_for_next_step()
+        if terminated:
+            self._terminated = True
+            next_obs = self._get_terminal_obs()
+        else:
+            if self._time_step % config.T_CACHE_UPDATE_INTERVAL == 0:
+                for uav in self._uavs:
+                    uav.gdsf_cache_update()
 
-        self._prepare_for_next_step()
-        next_obs: list[np.ndarray] = self._get_obs()
+            # 4. Prepare for next time slot
+            for ue in self._ues:
+                ue.update_position()
+
+            for uav in self._uavs:
+                uav.reset_for_next_step()
+
+            self._prepare_for_next_step()
+            next_obs = self._get_obs()
+
         step_info = {
             "active_mask": active_mask,
             "next_active_mask": next_active_mask,
+            "terminated": terminated,
+            "fleet_failed": fleet_failed,
+            "termination_reason": termination_reason,
         }
         return next_obs, rewards, metrics + (step_collisions, step_boundaries), step_info
 
@@ -289,6 +316,35 @@ class Env:
                 neighbor_count,
                 ue_states.flatten(),
                 ue_count
+            ])
+            all_obs.append(obs)
+
+        return all_obs
+
+    def _get_terminal_obs(self) -> list[np.ndarray]:
+        """Build a terminal observation with current positions/activeness and zeroed dynamic context."""
+        all_obs: list[np.ndarray] = []
+        pos_norm = np.array([config.AREA_WIDTH, config.AREA_HEIGHT, config.UE_MAX_ALT], dtype=np.float32)
+        zero_neighbors = np.zeros(config.MAX_UAV_NEIGHBORS * config.NEIGHBOR_STATE_DIM, dtype=np.float32)
+        zero_neighbor_count = np.zeros(1, dtype=np.float32)
+        zero_ues = np.zeros(config.MAX_ASSOCIATED_UES * config.UE_STATE_DIM, dtype=np.float32)
+        zero_ue_count = np.zeros(1, dtype=np.float32)
+
+        for uav in self._uavs:
+            own_pos: np.ndarray = (uav.pos / pos_norm).astype(np.float32, copy=False)
+            own_cache: np.ndarray = (
+                uav.cache.astype(np.float32)
+                if uav.active else np.zeros(config.NUM_FILES, dtype=np.float32)
+            )
+            own_is_active = np.array([1.0 if uav.active else 0.0], dtype=np.float32)
+            obs: np.ndarray = np.concatenate([
+                own_pos,
+                own_cache,
+                own_is_active,
+                zero_neighbors,
+                zero_neighbor_count,
+                zero_ues,
+                zero_ue_count,
             ])
             all_obs.append(obs)
 
@@ -450,49 +506,125 @@ class Env:
                 
                 ue.interference_power = total_interference
 
-    def _get_rewards_and_metrics(self) -> tuple[list[float], tuple[float, float, float, float, dict]]:
-        """Returns reward, metrics, and fixed-scale reward diagnostics."""
+    def _get_rewards_and_metrics(
+        self,
+        active_mask: np.ndarray,
+        next_active_mask: np.ndarray,
+    ) -> tuple[list[float], tuple[float, float, float, float, dict]]:
+        """Compute mixed shared/local rewards for active agents and diagnostics for the current slot."""
+        active_mask = active_mask.astype(np.float32, copy=False)
+        active_mask_bool = active_mask.astype(bool, copy=False)
+        next_active_mask_bool = next_active_mask.astype(bool, copy=False)
+
         total_latency: float = sum(ue.latency_current_request if ue.assigned else config.NON_SERVED_LATENCY_PENALTY for ue in self._ues)
         total_energy: float = sum(uav.energy for uav in self._uavs)
         total_rate: float = sum(uav.total_downlink_rate for uav in self._uavs)
-        
+
         sc_metrics: np.ndarray = np.array([ue.service_coverage for ue in self._ues])
         jfi: float = 0.0
         if sc_metrics.size > 0 and np.sum(sc_metrics**2) > 0:
             jfi = (np.sum(sc_metrics) ** 2) / (sc_metrics.size * np.sum(sc_metrics**2))
 
-        scaled_latency = total_latency / (config.LATENCY_REWARD_SCALE + config.EPSILON)
-        scaled_energy = total_energy / (config.ENERGY_REWARD_SCALE + config.EPSILON)
-        scaled_rate = total_rate / (config.RATE_REWARD_SCALE + config.EPSILON)
+        fairness_signal: float = float(np.clip(
+            (jfi - config.REWARD_FAIRNESS_TARGET) * config.REWARD_FAIRNESS_GAIN,
+            -config.REWARD_FAIRNESS_CLIP,
+            config.REWARD_FAIRNESS_CLIP,
+        ))
+        reward_shared_fairness: float = config.REWARD_FAIRNESS_SHARED_COEF * fairness_signal
+        reward_shared_rate: float = config.REWARD_RATE_SHARED_COEF * float(
+            _scaled_log1p(total_rate, config.REWARD_GLOBAL_RATE_SCALE)
+        )
+        penalty_shared_latency: float = config.REWARD_LATENCY_SHARED_COEF * float(
+            _scaled_log1p(total_latency, config.REWARD_GLOBAL_LATENCY_SCALE)
+        )
+        reward_shared_total: float = reward_shared_fairness + reward_shared_rate - penalty_shared_latency
 
-        r_latency: float = config.ALPHA_1 * np.log1p(scaled_latency)
-        r_energy: float = config.ALPHA_2 * np.log1p(scaled_energy)
-        r_fairness: float = config.ALPHA_3 * np.clip((jfi - 0.6) * 5.0, -2.0, 2.0)
-        r_rate: float = config.ALPHA_RATE * np.log1p(scaled_rate)
+        local_rates: np.ndarray = np.array(
+            [uav.total_downlink_rate if active_mask_bool[uav.id] else 0.0 for uav in self._uavs],
+            dtype=np.float32,
+        )
+        local_mean_latencies: np.ndarray = np.array(
+            [uav.mean_associated_latency if active_mask_bool[uav.id] else 0.0 for uav in self._uavs],
+            dtype=np.float32,
+        )
+        local_energies: np.ndarray = np.array(
+            [uav.energy if active_mask_bool[uav.id] else 0.0 for uav in self._uavs],
+            dtype=np.float32,
+        )
+        proximity_penalties: np.ndarray = np.array(
+            [uav.proximity_penalty if active_mask_bool[uav.id] else 0.0 for uav in self._uavs],
+            dtype=np.float32,
+        )
+        boundary_penalties: np.ndarray = np.array(
+            [config.BOUNDARY_PENALTY if active_mask_bool[uav.id] and uav.boundary_violation else 0.0 for uav in self._uavs],
+            dtype=np.float32,
+        )
+        remaining_episode_ratio: float = max(
+            0.0,
+            (config.STEPS_PER_EPISODE - self._time_step) / config.STEPS_PER_EPISODE,
+        )
+        fleet_failed: bool = bool(active_mask_bool.any() and not next_active_mask_bool.any())
+        penalty_fleet_failure: float = 0.0
+        if fleet_failed:
+            penalty_fleet_failure = config.FLEET_FAILURE_PENALTY_MULTIPLIER * (
+                config.COLLISION_PENALTY_BASE + config.COLLISION_PENALTY_EARLY_SCALE * remaining_episode_ratio
+            )
+        collision_penalties: np.ndarray = np.array(
+            [
+                config.COLLISION_PENALTY_BASE + config.COLLISION_PENALTY_EARLY_SCALE * remaining_episode_ratio
+                if active_mask_bool[uav.id] and uav.collision_violation else 0.0
+                for uav in self._uavs
+            ],
+            dtype=np.float32,
+        )
 
-        reward: float = r_fairness + r_rate - r_latency - r_energy
-        rewards: list[float] = [reward] * config.NUM_UAVS
-        for uav in self._uavs:
-            if uav.collision_violation:
-                rewards[uav.id] -= config.COLLISION_FAILURE_PENALTY
-            if uav.active:
-                rewards[uav.id] -= uav.proximity_penalty
-            if uav.active and uav.boundary_violation:
-                rewards[uav.id] -= config.BOUNDARY_PENALTY
-        rewards = [r * config.REWARD_SCALING_FACTOR for r in rewards]
+        reward_local_rate: np.ndarray = config.REWARD_RATE_LOCAL_COEF * _scaled_log1p(
+            local_rates, config.REWARD_LOCAL_RATE_SCALE
+        )
+        penalty_local_latency: np.ndarray = config.REWARD_LATENCY_LOCAL_COEF * _scaled_log1p(
+            local_mean_latencies, config.REWARD_LOCAL_LATENCY_SCALE
+        )
+        penalty_local_energy: np.ndarray = config.REWARD_ENERGY_LOCAL_COEF * _scaled_log1p(
+            local_energies, config.REWARD_LOCAL_ENERGY_SCALE
+        )
+
+        reward_raw: np.ndarray = active_mask * (
+            reward_shared_total
+            + reward_local_rate
+            - penalty_local_latency
+            - penalty_local_energy
+            - proximity_penalties
+            - boundary_penalties
+            - collision_penalties
+            - penalty_fleet_failure
+        )
+        rewards: list[float] = (reward_raw * config.REWARD_SCALING_FACTOR).tolist()
+
+        reward_local_rate_mean, reward_local_rate_std = _masked_mean_std(reward_local_rate, active_mask)
+        penalty_local_latency_mean, penalty_local_latency_std = _masked_mean_std(penalty_local_latency, active_mask)
+        penalty_local_energy_mean, penalty_local_energy_std = _masked_mean_std(penalty_local_energy, active_mask)
+        penalty_proximity_mean, _ = _masked_mean_std(proximity_penalties, active_mask)
+        penalty_boundary_mean, _ = _masked_mean_std(boundary_penalties, active_mask)
+        penalty_collision_mean, _ = _masked_mean_std(collision_penalties, active_mask)
 
         reward_stats = {
-            "total_latency": total_latency,
-            "total_energy": total_energy,
-            "total_rate": total_rate,
-            "scaled_latency": scaled_latency,
-            "scaled_energy": scaled_energy,
-            "scaled_rate": scaled_rate,
-            "r_latency": r_latency,
-            "r_energy": r_energy,
-            "r_fairness": r_fairness,
-            "r_rate": r_rate,
-            "shared_reward": reward,
+            "reward_shared_total": reward_shared_total,
+            "reward_shared_fairness": reward_shared_fairness,
+            "reward_shared_rate": reward_shared_rate,
+            "penalty_shared_latency": penalty_shared_latency,
+            "reward_local_rate_mean": reward_local_rate_mean,
+            "reward_local_rate_std": reward_local_rate_std,
+            "penalty_local_latency_mean": penalty_local_latency_mean,
+            "penalty_local_latency_std": penalty_local_latency_std,
+            "penalty_local_energy_mean": penalty_local_energy_mean,
+            "penalty_local_energy_std": penalty_local_energy_std,
+            "penalty_proximity_mean": penalty_proximity_mean,
+            "penalty_boundary_mean": penalty_boundary_mean,
+            "penalty_collision_mean": penalty_collision_mean,
+            "active_agents": int(active_mask_bool.sum()),
+            "active_agents_next": int(next_active_mask_bool.sum()),
+            "penalty_fleet_failure": penalty_fleet_failure,
+            "fleet_failed_step": float(fleet_failed),
         }
 
         return rewards, (total_latency, total_energy, jfi, total_rate, reward_stats)

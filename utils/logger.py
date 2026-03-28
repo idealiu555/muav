@@ -67,6 +67,23 @@ class Logger:
             raise FileNotFoundError(f"❌ Config file not found: {config_path}")
         with open(config_path, "r") as f:
             config_dict = json.load(f)
+        current_keys = {
+            key for key in dir(default_config)
+            if key.isupper() and not key.startswith("__") and not callable(getattr(default_config, key))
+        }
+        loaded_keys = set(config_dict.keys())
+        missing_keys = sorted(current_keys - loaded_keys)
+        extra_keys = sorted(loaded_keys - current_keys)
+        if missing_keys or extra_keys:
+            problems: list[str] = []
+            if missing_keys:
+                problems.append(f"missing keys: {', '.join(missing_keys)}")
+            if extra_keys:
+                problems.append(f"unknown keys: {', '.join(extra_keys)}")
+            raise ValueError(
+                "❌ Config file is incompatible with the current codebase; "
+                + "; ".join(problems)
+            )
         for key, value in config_dict.items():
             # Convert lists back to numpy arrays where appropriate
             if isinstance(getattr(default_config, key, None), np.ndarray):
