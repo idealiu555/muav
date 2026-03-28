@@ -63,7 +63,6 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
             next_obs, rewards, (total_latency, total_energy, jfi, total_rate, reward_stats, step_collisions, step_boundaries), _step_info = env.step(actions)
             _append_active_actions(action_accumulator, actions, _step_info["active_mask"])
             # update_trajectories(env)  # tracking code, comment if not needed
-            next_state: np.ndarray = np.concatenate(next_obs, axis=0)
             buffer.add(
                 state,
                 obs_arr,
@@ -75,7 +74,7 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
             )
 
             obs = next_obs
-            state = next_state
+            state = np.concatenate(next_obs, axis=0)
 
             rollout_reward += np.sum(rewards)
             rollout_latency += total_latency
@@ -90,7 +89,7 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
                     training_stats_accumulator[key] = []
                 training_stats_accumulator[key].append(value)
 
-        buffer.compute_returns_and_advantages(config.DISCOUNT_FACTOR)
+        buffer.compute_returns_and_advantages(config.DISCOUNT_FACTOR, config.PPO_GAE_LAMBDA)
 
         for _ in range(config.PPO_EPOCHS):
             for batch in buffer.get_batches(config.PPO_BATCH_SIZE):

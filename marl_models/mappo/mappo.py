@@ -86,32 +86,9 @@ class MAPPO(MARLModel):
         active_mask_batch: torch.Tensor = batch["active_mask"]
         agent_indices_batch: torch.Tensor = batch["agent_indices"]
 
-        valid_mask: torch.Tensor = active_mask_batch.float()
-        valid_mask_bool: torch.Tensor = valid_mask.bool()
-        valid_count = int(valid_mask.sum().item())
-
-        if valid_count > 0:
-            valid_advantages: torch.Tensor = advantages_batch[valid_mask_bool]
-            if valid_count > 1:
-                adv_mean: torch.Tensor = valid_advantages.mean()
-                adv_std: torch.Tensor = valid_advantages.std(unbiased=False)
-                valid_advantages = (valid_advantages - adv_mean) / (adv_std + 1e-8)
-            valid_advantages = torch.clamp(valid_advantages, -10.0, 10.0)
-            advantages_batch = torch.zeros_like(advantages_batch)
-            advantages_batch[valid_mask_bool] = valid_advantages
-        else:
-            return {
-                "actor_loss": 0.0,
-                "critic_loss": 0.0,
-                "entropy": 0.0,
-                "ratio_mean": 0.0,
-                "approx_kl": 0.0,
-                "clip_fraction": 0.0,
-                "actor_grad_norm": 0.0,
-                "critic_grad_norm": 0.0,
-                "value_mean": 0.0,
-                "valid_samples": 0.0,
-            }
+        actor_mask: torch.Tensor = active_mask_batch.float()
+        actor_mask_bool: torch.Tensor = actor_mask.bool()
+        valid_count = int(actor_mask.sum().item())
 
         # Critic Loss
         batch_size = states_batch.shape[0]
@@ -120,31 +97,49 @@ class MAPPO(MARLModel):
         values_clipped: torch.Tensor = old_values_batch + torch.clamp(values - old_values_batch, -config.PPO_VALUE_CLIP_EPS, config.PPO_VALUE_CLIP_EPS)
         vf_loss1: torch.Tensor = (values - returns_batch).pow(2)
         vf_loss2: torch.Tensor = (values_clipped - returns_batch).pow(2)
-        critic_loss: torch.Tensor = 0.5 * masked_mean(torch.max(vf_loss1, vf_loss2), valid_mask)
+        critic_loss: torch.Tensor = 0.5 * torch.max(vf_loss1, vf_loss2).mean()
 
         # Actor Loss
-        dist: Normal = self.actors(obs_batch)
-        _, new_log_probs = self._squash_action_and_log_prob(dist, pre_tanh_actions_batch)
-        log_ratio: torch.Tensor = torch.clamp(
-            new_log_probs - old_log_probs_batch,
-            -config.PPO_MAX_LOG_RATIO,
-            config.PPO_MAX_LOG_RATIO,
-        )
-        ratio: torch.Tensor = torch.exp(log_ratio)
+        if valid_count > 0:
+            valid_advantages: torch.Tensor = advantages_batch[actor_mask_bool]
+            if valid_count > 1:
+                adv_mean: torch.Tensor = valid_advantages.mean()
+                adv_std: torch.Tensor = valid_advantages.std(unbiased=False)
+                valid_advantages = (valid_advantages - adv_mean) / (adv_std + 1e-8)
+            valid_advantages = torch.clamp(valid_advantages, -10.0, 10.0)
+            advantages_batch = torch.zeros_like(advantages_batch)
+            advantages_batch[actor_mask_bool] = valid_advantages
 
-        # PPO surrogate loss
-        surr1: torch.Tensor = ratio * advantages_batch
-        surr2: torch.Tensor = torch.clamp(ratio, 1.0 - config.PPO_CLIP_EPS, 1.0 + config.PPO_CLIP_EPS) * advantages_batch
-        actor_loss: torch.Tensor = -masked_mean(torch.min(surr1, surr2), valid_mask)
+            dist: Normal = self.actors(obs_batch)
+            _, new_log_probs = self._squash_action_and_log_prob(dist, pre_tanh_actions_batch)
+            log_ratio: torch.Tensor = torch.clamp(
+                new_log_probs - old_log_probs_batch,
+                -config.PPO_MAX_LOG_RATIO,
+                config.PPO_MAX_LOG_RATIO,
+            )
+            ratio: torch.Tensor = torch.exp(log_ratio)
 
-        # Use pre-tanh entropy by default for lower-variance PPO updates.
-        if config.PPO_USE_SQUASHED_ENTROPY:
-            entropy_pre_tanh: torch.Tensor = dist.rsample()
-            _, entropy_log_probs = self._squash_action_and_log_prob(dist, entropy_pre_tanh)
-            entropy: torch.Tensor = masked_mean(-entropy_log_probs, valid_mask)
+            surr1: torch.Tensor = ratio * advantages_batch
+            surr2: torch.Tensor = torch.clamp(ratio, 1.0 - config.PPO_CLIP_EPS, 1.0 + config.PPO_CLIP_EPS) * advantages_batch
+            actor_loss: torch.Tensor = -masked_mean(torch.min(surr1, surr2), actor_mask)
+
+            if config.PPO_USE_SQUASHED_ENTROPY:
+                entropy_pre_tanh: torch.Tensor = dist.rsample()
+                _, entropy_log_probs = self._squash_action_and_log_prob(dist, entropy_pre_tanh)
+                entropy: torch.Tensor = masked_mean(-entropy_log_probs, actor_mask)
+            else:
+                entropy = masked_mean(dist.entropy().sum(dim=-1), actor_mask)
+            actor_loss -= config.PPO_ENTROPY_COEF * entropy
+
+            ratio_mean = masked_mean(ratio, actor_mask).item()
+            approx_kl = masked_mean((old_log_probs_batch - new_log_probs).abs(), actor_mask).item()
+            clip_fraction = masked_mean((torch.abs(ratio - 1.0) > config.PPO_CLIP_EPS).float(), actor_mask).item()
         else:
-            entropy = masked_mean(dist.entropy().sum(dim=-1), valid_mask)
-        actor_loss -= config.PPO_ENTROPY_COEF * entropy
+            actor_loss = torch.zeros((), device=self.device)
+            entropy = torch.zeros((), device=self.device)
+            ratio_mean = 0.0
+            approx_kl = 0.0
+            clip_fraction = 0.0
 
         # Combined update: zero gradients once, compute both losses, then step
         # Using set_to_none=True is faster than setting to zero
@@ -164,12 +159,12 @@ class MAPPO(MARLModel):
             "actor_loss": actor_loss.item(),
             "critic_loss": critic_loss.item(),
             "entropy": entropy.item(),
-            "ratio_mean": masked_mean(ratio, valid_mask).item(),
-            "approx_kl": masked_mean((old_log_probs_batch - new_log_probs).abs(), valid_mask).item(),
-            "clip_fraction": masked_mean((torch.abs(ratio - 1.0) > config.PPO_CLIP_EPS).float(), valid_mask).item(),
+            "ratio_mean": ratio_mean,
+            "approx_kl": approx_kl,
+            "clip_fraction": clip_fraction,
             "actor_grad_norm": float(actor_grad_norm),
             "critic_grad_norm": float(critic_grad_norm),
-            "value_mean": masked_mean(values, valid_mask).item(),
+            "value_mean": values.mean().item(),
             "valid_samples": float(valid_count),
         }
 

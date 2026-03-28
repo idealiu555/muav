@@ -185,6 +185,7 @@ PPO_BATCH_SIZE: int = 512  # size of mini-batches to use during the update step 
 PPO_CLIP_EPS: float = 0.2  # clipping parameter (epsilon) for the PPO surrogate objective
 PPO_VALUE_CLIP_EPS: float = 0.2  # clipping parameter for value function (can be same or different from policy clip)
 PPO_ENTROPY_COEF: float = 0.01  # coefficient for the entropy bonus to encourage exploration
+PPO_GAE_LAMBDA: float = 0.95  # GAE lambda for lower-variance advantage estimation
 PPO_MAX_LOG_RATIO: float = 10.0  # clip log-ratio before exp to avoid numerical spikes
 PPO_USE_SQUASHED_ENTROPY: bool = False  # False: use lower-variance pre-tanh entropy proxy
 

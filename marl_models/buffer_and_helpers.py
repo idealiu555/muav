@@ -90,15 +90,22 @@ class RolloutBuffer:
 
         self.step += 1
 
-    def compute_returns_and_advantages(self, gamma: float) -> None:
-        """Compute exact discounted returns over the shared-reward rollout."""
+    def compute_returns_and_advantages(self, gamma: float, gae_lambda: float) -> None:
+        """Compute finite-horizon GAE targets for the collected rollout."""
         num_steps = self.step
-        discounted_return: np.ndarray = np.zeros(self.num_agents, dtype=np.float32)
+        last_gae_lam: np.ndarray = np.zeros(self.num_agents, dtype=np.float32)
 
         for t in reversed(range(num_steps)):
-            discounted_return = self.rewards[t] + gamma * discounted_return
-            self.returns[t] = discounted_return
-            self.advantages[t] = discounted_return - self.values[t]
+            if t == num_steps - 1:
+                next_values: np.ndarray = np.zeros(self.num_agents, dtype=np.float32)
+            else:
+                next_values = self.values[t + 1]
+
+            delta: np.ndarray = self.rewards[t] + gamma * next_values - self.values[t]
+            last_gae_lam = delta + gamma * gae_lambda * last_gae_lam
+            self.advantages[t] = last_gae_lam
+
+        self.returns[:num_steps] = self.advantages[:num_steps] + self.values[:num_steps]
 
     def get_batches(self, batch_size: int) -> Generator[dict[str, torch.Tensor], None, None]:
         """A generator that yields mini-batches from the buffer."""
