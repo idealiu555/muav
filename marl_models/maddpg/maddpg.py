@@ -201,11 +201,12 @@ class MADDPG(MARLModel):
         
         # Step shared encoder optimizer after all gradients have accumulated
         if config.USE_ATTENTION:
-            # Scale gradients by 1/num_agents to prevent accumulation explosion from N agents
+            # Scale gradients by the number of agents that actually contributed updates.
             with torch.no_grad():
+                encoder_grad_scale = max(1, updated_agents)
                 for param in self.shared_encoder.parameters():
                     if param.grad is not None:
-                        param.grad.div_(self.num_agents)
+                        param.grad.div_(encoder_grad_scale)
             
             torch.nn.utils.clip_grad_norm_(self.shared_encoder.parameters(), config.MAX_GRAD_NORM)
             self.shared_encoder_optimizer.step()
