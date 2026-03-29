@@ -22,15 +22,19 @@ class ActorNetwork(nn.Module):
         self.fc2: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, config.MLP_HIDDEN_DIM))
         self.ln2: nn.LayerNorm = nn.LayerNorm(config.MLP_HIDDEN_DIM)
         self.mean: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, action_dim), std=0.01)
-        self.log_std: nn.Parameter = nn.Parameter(torch.zeros(1, action_dim))
+        self.log_std: nn.Parameter = nn.Parameter(
+            torch.full((1, action_dim), float(config.PPO_LOG_STD_INIT))
+        )
 
     def forward(self, obs: torch.Tensor) -> Normal:
         x: torch.Tensor = torch.relu(self.ln1(self.fc1(obs)))
         x = torch.relu(self.ln2(self.fc2(x)))
-        # Output the mean of the distribution without tanh - let PPO clip handle bounds
-        # This prevents gradient issues from double squashing (tanh + clip)
         mean: torch.Tensor = self.mean(x)
-        log_std: torch.Tensor = torch.clamp(self.log_std, config.LOG_STD_MIN, config.LOG_STD_MAX)
+        log_std: torch.Tensor = torch.clamp(
+            self.log_std,
+            config.PPO_LOG_STD_MIN,
+            config.PPO_LOG_STD_MAX,
+        )
         std: torch.Tensor = torch.exp(log_std)
         return Normal(mean, std)
 

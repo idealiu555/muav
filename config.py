@@ -122,7 +122,7 @@ BEAM_OFFSET_RANGE: float = 30.0          # offset模式下的最大偏移范围 
 # Model Parameters
 
 # Reward shaping parameters
-# 共享项仅保留系统级目标；可归因目标使用本地项。
+# 共享项负责系统级服务质量；本地项只保留可归因的吞吐/能耗与安全成本。
 REWARD_SCALING_FACTOR: float = 0.12
 REWARD_FAIRNESS_TARGET: float = 0.6
 REWARD_FAIRNESS_GAIN: float = 5.0
@@ -131,10 +131,8 @@ REWARD_FAIRNESS_SHARED_COEF: float = 1.2
 REWARD_RATE_SHARED_COEF: float = 0.5
 REWARD_RATE_LOCAL_COEF: float = 0.5
 REWARD_LATENCY_SHARED_COEF: float = 0.525
-REWARD_LATENCY_LOCAL_COEF: float = 0.525
 REWARD_ENERGY_LOCAL_COEF: float = 0.8
 REWARD_GLOBAL_LATENCY_SCALE: float = NUM_UES * TIME_SLOT_DURATION
-REWARD_LOCAL_LATENCY_SCALE: float = TIME_SLOT_DURATION
 REWARD_GLOBAL_RATE_SCALE: float = 1e8
 REWARD_LOCAL_RATE_SCALE: float = REWARD_GLOBAL_RATE_SCALE / NUM_UAVS
 REWARD_LOCAL_ENERGY_SCALE: float = POWER_HOVER * TIME_SLOT_DURATION
@@ -166,8 +164,8 @@ CRITIC_LR: float = 2e-4
 DISCOUNT_FACTOR: float = 0.99  # gamma
 UPDATE_FACTOR: float = 0.001  # tau
 MAX_GRAD_NORM: float = 8.0  # maximum norm for gradient clipping to prevent exploding gradients
-LOG_STD_MAX: float = 2  # maximum log standard deviation for stochastic policies
-LOG_STD_MIN: float = -20  # minimum log standard deviation for stochastic policies
+LOG_STD_MAX: float = 2  # maximum log standard deviation for SAC-style stochastic policies
+LOG_STD_MIN: float = -20  # minimum log standard deviation for SAC-style stochastic policies
 EPSILON: float = 1e-9  # small value to prevent division by zero
 
 # Off-policy algorithm hyperparameters
@@ -191,14 +189,18 @@ NOISE_CLIP: float = 0.5  # range to clip target policy smoothing noise
 PPO_ROLLOUT_LENGTH: int = 1000  # number of steps to collect per rollout (Set to STEPS_PER_EPISODE for episodic tasks)
 PPO_EPOCHS: int = 10  # number of epochs to run on the collected rollout data
 PPO_BATCH_SIZE: int = 512  # size of mini-batches to use during the update step (increased from 64 for better GPU utilization)
+PPO_ACTOR_LR: float = 5e-5
+PPO_CRITIC_LR: float = 1e-4
 PPO_CLIP_EPS: float = 0.2  # clipping parameter (epsilon) for the PPO surrogate objective
 PPO_VALUE_CLIP_EPS: float = 0.2  # clipping parameter for value function (can be same or different from policy clip)
-PPO_ENTROPY_COEF: float = 0.01  # initial entropy bonus coefficient for PPO exploration
-PPO_FINAL_ENTROPY_COEF: float = 0.001  # final entropy bonus coefficient after linear annealing
-PPO_ENTROPY_ANNEAL_UPDATES: int = 1000  # number of MAPPO updates over which entropy anneals to the final value
+PPO_ENTROPY_COEF: float = 0.001
 PPO_GAE_LAMBDA: float = 0.95  # GAE lambda for lower-variance advantage estimation
+PPO_TARGET_KL: float = 0.03
 PPO_MAX_LOG_RATIO: float = 10.0  # clip log-ratio before exp to avoid numerical spikes
 PPO_USE_SQUASHED_ENTROPY: bool = False  # False: use lower-variance pre-tanh entropy proxy
+PPO_LOG_STD_INIT: float = -0.5
+PPO_LOG_STD_MIN: float = -4.0
+PPO_LOG_STD_MAX: float = 0.5
 
 # MASAC Specific Hyperparameters
 ALPHA_LR: float = 3e-4  # learning rate for the entropy temperature alpha

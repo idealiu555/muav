@@ -112,12 +112,6 @@ class UAV:
     def proximity_penalty(self) -> float:
         return self._proximity_penalty
 
-    @property
-    def mean_associated_latency(self) -> float:
-        if not self._current_covered_ues:
-            return 0.0
-        return float(np.mean([ue.latency_current_request for ue in self._current_covered_ues]))
-
     def add_proximity_penalty(self, penalty: float) -> None:
         self._proximity_penalty += penalty
 

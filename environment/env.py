@@ -530,21 +530,17 @@ class Env:
             -config.REWARD_FAIRNESS_CLIP,
             config.REWARD_FAIRNESS_CLIP,
         ))
-        reward_shared_fairness: float = config.REWARD_FAIRNESS_SHARED_COEF * fairness_signal
-        reward_shared_rate: float = config.REWARD_RATE_SHARED_COEF * float(
+        reward_team_fairness: float = config.REWARD_FAIRNESS_SHARED_COEF * fairness_signal
+        reward_team_rate: float = config.REWARD_RATE_SHARED_COEF * float(
             _scaled_log1p(total_rate, config.REWARD_GLOBAL_RATE_SCALE)
         )
-        penalty_shared_latency: float = config.REWARD_LATENCY_SHARED_COEF * float(
+        penalty_team_latency: float = config.REWARD_LATENCY_SHARED_COEF * float(
             _scaled_log1p(total_latency, config.REWARD_GLOBAL_LATENCY_SCALE)
         )
-        reward_shared_total: float = reward_shared_fairness + reward_shared_rate - penalty_shared_latency
+        reward_team_service: float = reward_team_fairness + reward_team_rate - penalty_team_latency
 
         local_rates: np.ndarray = np.array(
             [uav.total_downlink_rate if active_mask_bool[uav.id] else 0.0 for uav in self._uavs],
-            dtype=np.float32,
-        )
-        local_mean_latencies: np.ndarray = np.array(
-            [uav.mean_associated_latency if active_mask_bool[uav.id] else 0.0 for uav in self._uavs],
             dtype=np.float32,
         )
         local_energies: np.ndarray = np.array(
@@ -581,17 +577,13 @@ class Env:
         reward_local_rate: np.ndarray = config.REWARD_RATE_LOCAL_COEF * _scaled_log1p(
             local_rates, config.REWARD_LOCAL_RATE_SCALE
         )
-        penalty_local_latency: np.ndarray = config.REWARD_LATENCY_LOCAL_COEF * _scaled_log1p(
-            local_mean_latencies, config.REWARD_LOCAL_LATENCY_SCALE
-        )
         penalty_local_energy: np.ndarray = config.REWARD_ENERGY_LOCAL_COEF * _scaled_log1p(
             local_energies, config.REWARD_LOCAL_ENERGY_SCALE
         )
 
         reward_raw: np.ndarray = active_mask * (
-            reward_shared_total
+            reward_team_service
             + reward_local_rate
-            - penalty_local_latency
             - penalty_local_energy
             - proximity_penalties
             - boundary_penalties
@@ -601,26 +593,23 @@ class Env:
         rewards: list[float] = (reward_raw * config.REWARD_SCALING_FACTOR).tolist()
 
         reward_local_rate_mean, reward_local_rate_std = _masked_mean_std(reward_local_rate, active_mask)
-        penalty_local_latency_mean, penalty_local_latency_std = _masked_mean_std(penalty_local_latency, active_mask)
         penalty_local_energy_mean, penalty_local_energy_std = _masked_mean_std(penalty_local_energy, active_mask)
-        penalty_proximity_mean, _ = _masked_mean_std(proximity_penalties, active_mask)
-        penalty_boundary_mean, _ = _masked_mean_std(boundary_penalties, active_mask)
-        penalty_collision_mean, _ = _masked_mean_std(collision_penalties, active_mask)
+        penalty_safety_proximity_mean, _ = _masked_mean_std(proximity_penalties, active_mask)
+        penalty_safety_boundary_mean, _ = _masked_mean_std(boundary_penalties, active_mask)
+        penalty_safety_collision_mean, _ = _masked_mean_std(collision_penalties, active_mask)
 
         reward_stats = {
-            "reward_shared_total": reward_shared_total,
-            "reward_shared_fairness": reward_shared_fairness,
-            "reward_shared_rate": reward_shared_rate,
-            "penalty_shared_latency": penalty_shared_latency,
+            "reward_team_service": reward_team_service,
+            "reward_team_fairness": reward_team_fairness,
+            "reward_team_rate": reward_team_rate,
+            "penalty_team_latency": penalty_team_latency,
             "reward_local_rate_mean": reward_local_rate_mean,
             "reward_local_rate_std": reward_local_rate_std,
-            "penalty_local_latency_mean": penalty_local_latency_mean,
-            "penalty_local_latency_std": penalty_local_latency_std,
             "penalty_local_energy_mean": penalty_local_energy_mean,
             "penalty_local_energy_std": penalty_local_energy_std,
-            "penalty_proximity_mean": penalty_proximity_mean,
-            "penalty_boundary_mean": penalty_boundary_mean,
-            "penalty_collision_mean": penalty_collision_mean,
+            "penalty_safety_proximity_mean": penalty_safety_proximity_mean,
+            "penalty_safety_boundary_mean": penalty_safety_boundary_mean,
+            "penalty_safety_collision_mean": penalty_safety_collision_mean,
             "active_agents": int(active_mask_bool.sum()),
             "active_agents_next": int(next_active_mask_bool.sum()),
             "penalty_fleet_failure": penalty_fleet_failure,

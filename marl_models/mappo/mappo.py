@@ -20,8 +20,8 @@ class MAPPO(MARLModel):
         self.critics: CriticNetwork = CriticNetwork(state_dim, num_agents).to(device)
 
         # Create optimizers
-        self.actor_optimizer: torch.optim.AdamW = torch.optim.AdamW(self.actors.parameters(), lr=config.ACTOR_LR)
-        self.critic_optimizer: torch.optim.AdamW = torch.optim.AdamW(self.critics.parameters(), lr=config.CRITIC_LR)
+        self.actor_optimizer: torch.optim.AdamW = torch.optim.AdamW(self.actors.parameters(), lr=config.PPO_ACTOR_LR)
+        self.critic_optimizer: torch.optim.AdamW = torch.optim.AdamW(self.critics.parameters(), lr=config.PPO_CRITIC_LR)
         self.entropy_coef: float = config.PPO_ENTROPY_COEF
 
     @staticmethod
@@ -37,9 +37,6 @@ class MAPPO(MARLModel):
     def _get_active_mask(self, obs: np.ndarray) -> torch.Tensor:
         active_mask_np = (obs[:, self.active_flag_index] >= 0.5).astype(np.float32)
         return torch.from_numpy(active_mask_np).to(self.device, non_blocking=True)
-
-    def set_entropy_coef(self, entropy_coef: float) -> None:
-        self.entropy_coef = float(entropy_coef)
 
     def select_actions(self, observations: list[np.ndarray], exploration: bool) -> np.ndarray:
         # Convert observations to tensor once (avoid repeated conversions)
@@ -106,6 +103,8 @@ class MAPPO(MARLModel):
                 "critic_grad_norm": 0.0,
                 "value_mean": 0.0,
                 "valid_samples": 0.0,
+                "policy_log_std_mean": 0.0,
+                "policy_std_mean": 0.0,
             }
 
         # Critic Loss
@@ -149,8 +148,11 @@ class MAPPO(MARLModel):
         actor_loss -= self.entropy_coef * entropy
 
         ratio_mean = masked_mean(ratio, valid_mask).item()
-        approx_kl = masked_mean((old_log_probs_batch - new_log_probs).abs(), valid_mask).item()
+        approx_kl = masked_mean((ratio - 1.0) - log_ratio, valid_mask).item()
         clip_fraction = masked_mean((torch.abs(ratio - 1.0) > config.PPO_CLIP_EPS).float(), valid_mask).item()
+        policy_log_std = torch.clamp(self.actors.log_std, config.PPO_LOG_STD_MIN, config.PPO_LOG_STD_MAX)
+        policy_log_std_mean = policy_log_std.mean().item()
+        policy_std_mean = torch.exp(policy_log_std).mean().item()
 
         # Combined update: zero gradients once, compute both losses, then step
         # Using set_to_none=True is faster than setting to zero
@@ -177,6 +179,8 @@ class MAPPO(MARLModel):
             "critic_grad_norm": float(critic_grad_norm),
             "value_mean": masked_mean(values, valid_mask).item(),
             "valid_samples": float(valid_count),
+            "policy_log_std_mean": policy_log_std_mean,
+            "policy_std_mean": policy_std_mean,
         }
 
     def reset(self) -> None:

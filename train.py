@@ -6,7 +6,6 @@ from utils.logger import Logger, Log
 from utils.plot_snapshots import plot_snapshot
 from utils.plot_logs import generate_plots_if_available
 import config
-import torch
 import numpy as np
 import time
 
@@ -17,13 +16,15 @@ def _append_active_actions(action_accumulator: list[np.ndarray], actions: np.nda
         action_accumulator.append(active_actions)
 
 
-def _anneal_entropy_coef(global_update: int) -> float:
-    anneal_updates: int = max(1, int(config.PPO_ENTROPY_ANNEAL_UPDATES))
-    if anneal_updates == 1:
-        return float(config.PPO_FINAL_ENTROPY_COEF)
-    clamped_update: int = min(max(global_update, 1), anneal_updates)
-    progress: float = (clamped_update - 1) / (anneal_updates - 1)
-    return float(config.PPO_ENTROPY_COEF + progress * (config.PPO_FINAL_ENTROPY_COEF - config.PPO_ENTROPY_COEF))
+def _append_training_stats(stats_accumulator: dict, stats: dict | None) -> None:
+    if not stats:
+        return
+    for key, value in stats.items():
+        if value is None:
+            continue
+        if key not in stats_accumulator:
+            stats_accumulator[key] = []
+        stats_accumulator[key].append(float(value))
 
 
 def _normalize_episode_metrics(
@@ -86,8 +87,6 @@ def train_on_policy(
 
     for local_update in range(1, num_updates + 1):
         update: int = completed_updates + local_update
-        if hasattr(model, "set_entropy_coef"):
-            model.set_entropy_coef(_anneal_entropy_coef(update))
         obs: list[np.ndarray] = env.reset()
         state: np.ndarray = np.concatenate(obs, axis=0)
         rollout_reward: float = 0.0
@@ -135,11 +134,7 @@ def train_on_policy(
             rollout_rate += total_rate
             rollout_collisions += step_collisions
             rollout_boundaries += step_boundaries
-            
-            for key, value in reward_stats.items():
-                if key not in training_stats_accumulator:
-                    training_stats_accumulator[key] = []
-                training_stats_accumulator[key].append(value)
+            _append_training_stats(training_stats_accumulator, reward_stats)
 
             if env_terminated:
                 fleet_failed = bool(_step_info["fleet_failed"])
@@ -150,17 +145,26 @@ def train_on_policy(
 
         buffer.compute_returns_and_advantages(config.DISCOUNT_FACTOR, config.PPO_GAE_LAMBDA)
 
+        epochs_used: int = 0
+        early_stop_triggered: bool = False
         for _ in range(config.PPO_EPOCHS):
+            epoch_kls: list[float] = []
             for batch in buffer.get_batches(config.PPO_BATCH_SIZE):
                 stats = model.update(batch)
-                if stats:
-                    for key, value in stats.items():
-                        if key not in training_stats_accumulator:
-                            training_stats_accumulator[key] = []
-                        training_stats_accumulator[key].append(value)
+                _append_training_stats(training_stats_accumulator, stats)
+                if stats and "approx_kl" in stats:
+                    epoch_kls.append(float(stats["approx_kl"]))
+            epochs_used += 1
+            if epoch_kls and float(np.mean(epoch_kls)) > config.PPO_TARGET_KL:
+                early_stop_triggered = True
+                break
 
         buffer.clear()
         total_step_count += rollout_steps
+        _append_training_stats(training_stats_accumulator, {
+            "ppo_epochs_used": float(epochs_used),
+            "ppo_early_stop": 1.0 if early_stop_triggered else 0.0,
+        })
 
         reward_avg, latency_avg, energy_avg, fairness_avg, rate_avg = _normalize_episode_metrics(
             rollout_reward,
@@ -270,10 +274,7 @@ def train_off_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: i
             if total_step_count > config.INITIAL_RANDOM_STEPS:
                 _append_active_actions(action_accumulator, actions, step_info["active_mask"])
             
-            for key, value in reward_stats.items():
-                if key not in training_stats_accumulator:
-                    training_stats_accumulator[key] = []
-                training_stats_accumulator[key].append(value)
+            _append_training_stats(training_stats_accumulator, reward_stats)
             
             env_terminated: bool = bool(step_info["terminated"])
             episode_done: bool = env_terminated or step == config.STEPS_PER_EPISODE
@@ -299,12 +300,7 @@ def train_off_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: i
                 batch = buffer.sample(config.REPLAY_BATCH_SIZE)
                 stats = model.update(batch)
                 update_count += 1
-                # Accumulate training statistics (filter None values to avoid diluting averages)
-                for key, value in stats.items():
-                    if value is not None:  # Only accumulate non-None values
-                        if key not in training_stats_accumulator:
-                            training_stats_accumulator[key] = []
-                        training_stats_accumulator[key].append(value)
+                _append_training_stats(training_stats_accumulator, stats)
 
             episode_reward += np.sum(rewards)
             episode_latency += total_latency
@@ -406,10 +402,7 @@ def train_random(env: Env, model: MARLModel, logger: Logger, num_episodes: int) 
             actions: np.ndarray = model.select_actions(obs, exploration=False)
             next_obs, rewards, (total_latency, total_energy, jfi, total_rate, reward_stats, step_collisions, step_boundaries), _step_info = env.step(actions)
 
-            for key, value in reward_stats.items():
-                if key not in training_stats_accumulator:
-                    training_stats_accumulator[key] = []
-                training_stats_accumulator[key].append(value)
+            _append_training_stats(training_stats_accumulator, reward_stats)
 
             episode_reward += np.sum(rewards)
             episode_latency += total_latency
