@@ -15,3 +15,5 @@ saved_models/
 *.json
 AGENTS.md
 log/
+docs/superpowers
+CLAUDE.md
