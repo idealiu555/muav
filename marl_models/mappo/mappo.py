@@ -97,7 +97,7 @@ class MAPPO(MARLModel):
         values_clipped: torch.Tensor = old_values_batch + torch.clamp(values - old_values_batch, -config.PPO_VALUE_CLIP_EPS, config.PPO_VALUE_CLIP_EPS)
         vf_loss1: torch.Tensor = (values - returns_batch).pow(2)
         vf_loss2: torch.Tensor = (values_clipped - returns_batch).pow(2)
-        critic_loss: torch.Tensor = 0.5 * torch.max(vf_loss1, vf_loss2).mean()
+        critic_loss: torch.Tensor = 0.5 * masked_mean(torch.max(vf_loss1, vf_loss2), actor_mask)
 
         # Actor Loss
         if valid_count > 0:
