@@ -91,20 +91,34 @@ class RolloutBuffer:
         self.step += 1
 
     def compute_returns_and_advantages(self, gamma: float, gae_lambda: float) -> None:
-        """Compute finite-horizon GAE targets for the collected rollout."""
+        """Compute finite-horizon GAE targets with agent-level termination handling.
+
+        For each agent, termination (transitioning from active to inactive) is treated
+        as a terminal state where next_value = 0 for bootstrapping.
+        GAE propagation stops for inactive agents via mask multiplication.
+        """
         num_steps = self.step
         last_gae_lam: np.ndarray = np.zeros(self.num_agents, dtype=np.float32)
 
         for t in reversed(range(num_steps)):
+            # Episode termination: all agents bootstrap from 0
             if t == num_steps - 1:
                 next_values: np.ndarray = np.zeros(self.num_agents, dtype=np.float32)
+                next_non_terminal: np.ndarray = np.zeros(self.num_agents, dtype=np.float32)
             else:
                 next_values = self.values[t + 1]
+                # Agent is non-terminal if it was active at t AND remains active at t+1
+                next_non_terminal = self.active_masks[t] * self.active_masks[t + 1]
 
-            delta: np.ndarray = self.rewards[t] + gamma * next_values - self.values[t]
-            last_gae_lam = delta + gamma * gae_lambda * last_gae_lam
+            # TD residual: delta = r + gamma * V_next * non_terminal - V
+            delta: np.ndarray = self.rewards[t] + gamma * next_values * next_non_terminal - self.values[t]
+
+            # GAE: A_t = delta_t + gamma * lambda * A_{t+1} * non_terminal
+            # The mask stops GAE propagation for terminated/inactive agents
+            last_gae_lam = delta + gamma * gae_lambda * last_gae_lam * next_non_terminal
             self.advantages[t] = last_gae_lam
 
+        # Returns = advantages + values (standard GAE target)
         self.returns[:num_steps] = self.advantages[:num_steps] + self.values[:num_steps]
 
     def get_batches(self, batch_size: int) -> Generator[dict[str, torch.Tensor], None, None]:
