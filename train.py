@@ -91,14 +91,26 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
 
         buffer.compute_returns_and_advantages(config.DISCOUNT_FACTOR, config.PPO_GAE_LAMBDA)
 
+        # Calculate current entropy coefficient (linear decay over training)
+        entropy_coef: float = config.PPO_ENTROPY_COEF_START - \
+            (config.PPO_ENTROPY_COEF_START - config.PPO_ENTROPY_COEF_END) * \
+            min(update / num_updates, 1.0)
+
         for _ in range(config.PPO_EPOCHS):
+            epoch_kl_exceeded: bool = False
             for batch in buffer.get_batches(config.PPO_BATCH_SIZE):
-                stats = model.update(batch)
+                stats = model.update(batch, entropy_coef)
                 if stats:
                     for key, value in stats.items():
                         if key not in training_stats_accumulator:
                             training_stats_accumulator[key] = []
                         training_stats_accumulator[key].append(value)
+                    # KL early stopping - stop all remaining epochs for this rollout
+                    if stats.get("approx_kl", 0) > config.PPO_KL_THRESHOLD:
+                        epoch_kl_exceeded = True
+                        break
+            if epoch_kl_exceeded:
+                break
 
         buffer.clear()
 
@@ -115,9 +127,8 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
         if update % config.LOG_FREQ == 0:
             elapsed_time: float = time.time() - start_time
             # Average training statistics
-            averaged_stats: dict | None = None
+            averaged_stats: dict = {"entropy_coef": entropy_coef}
             if training_stats_accumulator:
-                averaged_stats = {}
                 for key, values in training_stats_accumulator.items():
                     if key == 'noise_scale':
                         averaged_stats[key] = float(values[-1])
@@ -128,7 +139,7 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
                     all_actions = np.concatenate(action_accumulator, axis=0)
                     averaged_stats["action_mean"] = float(np.mean(all_actions))
                     averaged_stats["action_std"] = float(np.std(all_actions))
-            
+
             logger.log_metrics(update, rollout_log, config.LOG_FREQ, elapsed_time, "update", averaged_stats)
             rollout_log.keep_recent(config.LOG_FREQ * 2)  # Keep 2x window for safety
             # Reset accumulators

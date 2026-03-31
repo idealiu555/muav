@@ -22,7 +22,9 @@ class ActorNetwork(nn.Module):
         self.fc2: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, config.MLP_HIDDEN_DIM))
         self.ln2: nn.LayerNorm = nn.LayerNorm(config.MLP_HIDDEN_DIM)
         self.mean: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, action_dim), std=0.01)
-        self.log_std: nn.Parameter = nn.Parameter(torch.zeros(1, action_dim))
+        # Fixed log_std (not learnable) - prevents entropy explosion
+        # Registered as buffer so it moves with device and saves/loads properly
+        self.register_buffer("log_std", torch.zeros(1, action_dim))
 
     def forward(self, obs: torch.Tensor) -> Normal:
         x: torch.Tensor = torch.relu(self.ln1(self.fc1(obs)))

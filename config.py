@@ -180,11 +180,13 @@ NOISE_CLIP: float = 0.5  # range to clip target policy smoothing noise
 
 # MAPPO Specific Hyperparameters
 PPO_ROLLOUT_LENGTH: int = 1000  # number of steps to collect per rollout (Set to STEPS_PER_EPISODE for episodic tasks)
-PPO_EPOCHS: int = 10  # number of epochs to run on the collected rollout data
+PPO_EPOCHS: int = 4  # number of epochs to run on the collected rollout data (reduced from 10 to prevent overfitting)
 PPO_BATCH_SIZE: int = 512  # size of mini-batches to use during the update step (increased from 64 for better GPU utilization)
 PPO_CLIP_EPS: float = 0.2  # clipping parameter (epsilon) for the PPO surrogate objective
 PPO_VALUE_CLIP_EPS: float = 0.2  # clipping parameter for value function (can be same or different from policy clip)
-PPO_ENTROPY_COEF: float = 0.01  # coefficient for the entropy bonus to encourage exploration
+PPO_ENTROPY_COEF_START: float = 0.01  # initial entropy coefficient (decays over training to prevent entropy explosion)
+PPO_ENTROPY_COEF_END: float = 0.002  # final entropy coefficient
+PPO_KL_THRESHOLD: float = 0.02  # KL divergence threshold for early stopping (prevents aggressive policy changes)
 PPO_GAE_LAMBDA: float = 0.95  # GAE lambda for lower-variance advantage estimation
 PPO_MAX_LOG_RATIO: float = 10.0  # clip log-ratio before exp to avoid numerical spikes
 PPO_USE_SQUASHED_ENTROPY: bool = False  # False: use lower-variance pre-tanh entropy proxy

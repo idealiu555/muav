@@ -74,7 +74,7 @@ class MAPPO(MARLModel):
 
         return actions.cpu().numpy(), log_probs.cpu().numpy(), values.cpu().numpy(), pre_tanh_actions.cpu().numpy()
 
-    def update(self, batch: ExperienceBatch) -> dict:
+    def update(self, batch: ExperienceBatch, entropy_coef: float) -> dict:
         assert isinstance(batch, dict), "MAPPO expects OnPolicyExperienceBatch (dict)"
         obs_batch: torch.Tensor = batch["obs"]
         pre_tanh_actions_batch: torch.Tensor = batch["pre_tanh_actions"]
@@ -138,14 +138,14 @@ class MAPPO(MARLModel):
         surr2: torch.Tensor = torch.clamp(ratio, 1.0 - config.PPO_CLIP_EPS, 1.0 + config.PPO_CLIP_EPS) * advantages_batch
         actor_loss: torch.Tensor = -masked_mean(torch.min(surr1, surr2), actor_mask)
 
-        # Entropy bonus
+        # Entropy bonus (use decayed entropy_coef from caller)
         if config.PPO_USE_SQUASHED_ENTROPY:
             entropy_pre_tanh: torch.Tensor = dist.rsample()
             _, entropy_log_probs = self._squash_action_and_log_prob(dist, entropy_pre_tanh)
             entropy: torch.Tensor = masked_mean(-entropy_log_probs, actor_mask)
         else:
             entropy = masked_mean(dist.entropy().sum(dim=-1), actor_mask)
-        actor_loss -= config.PPO_ENTROPY_COEF * entropy
+        actor_loss -= entropy_coef * entropy
 
         # Combined gradient update
         self.actor_optimizer.zero_grad(set_to_none=True)
