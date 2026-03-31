@@ -1,13 +1,11 @@
 from marl_models.base_model import MARLModel
 from environment.env import Env
-from marl_models.utils import get_model
+from marl_models.utils import get_model, set_seed
 from train import train_on_policy, train_off_policy, train_random
 from test import test_model
 from utils.logger import Logger
 from utils.plot_logs import generate_plots_if_available
 import config
-import torch
-import numpy as np
 import argparse
 import os
 from datetime import datetime
@@ -19,8 +17,7 @@ def start_training(args: argparse.Namespace):
     logger: Logger = Logger("train_logs", timestamp)
     logger.log_configs()
 
-    np.random.seed(config.SEED)
-    torch.manual_seed(config.SEED)
+    set_seed(config.SEED)
     env: Env = Env()
     model_name: str = config.MODEL.lower()
     model: MARLModel = get_model(model_name)
@@ -43,8 +40,7 @@ def start_testing(args: argparse.Namespace):
     logger: Logger = Logger("test_logs", timestamp)
     logger.load_configs(args.config_path)
 
-    np.random.seed(config.SEED)
-    torch.manual_seed(config.SEED)
+    set_seed(config.SEED)
     env: Env = Env()
     model: MARLModel = get_model(config.MODEL.lower())
 

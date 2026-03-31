@@ -130,6 +130,12 @@ LATENCY_REWARD_SCALE: float = NUM_UES * TIME_SLOT_DURATION
 ENERGY_REWARD_SCALE: float = NUM_UAVS * POWER_HOVER * TIME_SLOT_DURATION
 RATE_REWARD_SCALE: float = 1e8
 
+# JFI reward parameters
+JFI_BASELINE: float = 0.6  # JFI threshold: values above are rewarded, below are penalized
+JFI_SCALE: float = 5.0    # Scaling factor for JFI deviation from baseline
+JFI_CLIP_MIN: float = -2.0  # Minimum clipped JFI reward component
+JFI_CLIP_MAX: float = 2.0   # Maximum clipped JFI reward component
+
 # UE state: pos(3) + file_id(1) + cache_hit(1) = 5
 UE_STATE_DIM: int = 5
 # Own state: pos(3) + cache(NUM_FILES) + is_active(1)
@@ -189,7 +195,6 @@ PPO_ENTROPY_COEF_END: float = 0.002  # final entropy coefficient
 PPO_KL_THRESHOLD: float = 0.02  # KL divergence threshold for early stopping (prevents aggressive policy changes)
 PPO_GAE_LAMBDA: float = 0.95  # GAE lambda for lower-variance advantage estimation
 PPO_MAX_LOG_RATIO: float = 10.0  # clip log-ratio before exp to avoid numerical spikes
-PPO_USE_SQUASHED_ENTROPY: bool = False  # False: use lower-variance pre-tanh entropy proxy
 
 # MASAC Specific Hyperparameters
 ALPHA_LR: float = 3e-4  # learning rate for the entropy temperature alpha

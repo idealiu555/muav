@@ -12,7 +12,7 @@ class UE:
     # 初始化 Zipf 分布：计算内容的排名概率（1 / rank^beta），归一化后存储在类变量中。
     # 反映了真实网络流量：少数热门内容占多数请求。
     def initialize_ue_class(cls) -> None:
-        # Content Zipf distribution
+        # Content Zipf distribution: content_id i corresponds to rank (i+1)
         cls.content_ids = np.arange(0, config.NUM_FILES)
         content_ranks: np.ndarray = np.arange(1, config.NUM_CONTENTS + 1)
         # config.ZIPF_BETA: Zipf 参数（通常 > 0），控制分布偏斜度（值越大，热门文件概率越高）。
@@ -90,7 +90,7 @@ class UE:
         self.latency_current_request = 0.0
         self.assigned = False
 
-    def update_service_coverage(self, current_time_step_t: int) -> None:
+    def update_service_coverage(self) -> None:
         """使用滑动窗口更新服务覆盖率，只考虑最近 N 步的表现。"""
         success: bool = self.assigned and self.latency_current_request <= config.TIME_SLOT_DURATION
         self._service_history.append(success)

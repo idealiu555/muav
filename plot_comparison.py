@@ -64,11 +64,11 @@ def plot_algorithm_comparison(
 
     # 指标配置
     metric_config = {
-        "reward": "Cumulative Reward",
+        "reward": "Average Team Reward (per step)",
         "latency": "Average Latency (s)",
-        "energy": "Energy Consumption (J)",
+        "energy": "Average Energy Consumption (J)",
         "fairness": "Jain's Fairness Index",
-        "rate": "System Throughput (bps)",
+        "rate": "Average System Throughput (bps)",
     }
     
     if metric not in metric_config:

@@ -101,7 +101,7 @@ class Env:
             uav.process_requests()
 
         for ue in self._ues:
-            ue.update_service_coverage(self._time_step)
+            ue.update_service_coverage()
 
         for uav in self._uavs:
             uav.update_ema_and_cache()
@@ -467,7 +467,7 @@ class Env:
 
         r_latency: float = config.ALPHA_1 * np.log1p(scaled_latency)
         r_energy: float = config.ALPHA_2 * np.log1p(scaled_energy)
-        r_fairness: float = config.ALPHA_3 * np.clip((jfi - 0.6) * 5.0, -2.0, 2.0)
+        r_fairness: float = config.ALPHA_3 * np.clip((jfi - config.JFI_BASELINE) * config.JFI_SCALE, config.JFI_CLIP_MIN, config.JFI_CLIP_MAX)
         r_rate: float = config.ALPHA_RATE * np.log1p(scaled_rate)
 
         reward: float = r_fairness + r_rate - r_latency - r_energy

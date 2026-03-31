@@ -6,7 +6,16 @@ from marl_models.masac.masac import MASAC
 from marl_models.random_baseline.random_model import RandomModel
 import config
 import torch
+import numpy as np
 import os
+
+
+def set_seed(seed: int) -> None:
+    """Set random seeds for reproducibility across numpy and torch."""
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def init_gpu_optimizations() -> None:

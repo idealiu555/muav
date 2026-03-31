@@ -53,14 +53,16 @@ COLORS = {
 def smooth_curve(values: np.ndarray, smoothing_weight: float = 0.9) -> np.ndarray:
     """
     使用指数移动平均(EMA)平滑曲线。
-    
+
     Args:
         values: 原始数据序列
         smoothing_weight: 平滑权重，越大越平滑 (0-1)
-    
+
     Returns:
         平滑后的数据序列
     """
+    if len(values) == 0:
+        return values
     smoothed = np.zeros_like(values, dtype=float)
     smoothed[0] = values[0]
     for i in range(1, len(values)):
@@ -68,35 +70,49 @@ def smooth_curve(values: np.ndarray, smoothing_weight: float = 0.9) -> np.ndarra
     return smoothed
 
 
-def compute_error_band(values: np.ndarray, window_size: int = 10) -> tuple[np.ndarray, np.ndarray]:
+def compute_error_band(values: np.ndarray, window_size: int = 10, smoothing: float = 0.9) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     计算滑动窗口内的标准差作为误差带。
-    
+
+    使用向量化的卷积操作计算滑动窗口均值和标准差，
+    避免了 Python 循环的 O(n × window) 复杂度。
+
     Args:
         values: 数据序列
         window_size: 滑动窗口大小
-    
+        smoothing: EMA平滑权重
+
     Returns:
-        (下界, 上界) 数组
+        (下界, 上界, 平滑均值) 数组
     """
     n = len(values)
-    std_values = np.zeros(n)
-    
-    for i in range(n):
-        start = max(0, i - window_size // 2)
-        end = min(n, i + window_size // 2 + 1)
-        std_values[i] = np.std(values[start:end])
-    
-    smoothed = smooth_curve(values)
-    return smoothed - std_values, smoothed + std_values
+    if n == 0:
+        return np.array([]), np.array([]), np.array([])
+
+    # 使用卷积计算滑动窗口均值 (O(n) 复杂度)
+    kernel = np.ones(window_size) / window_size
+    rolling_mean = np.convolve(values, kernel, mode='same')
+
+    # 使用卷积计算滑动窗口方差，再转换为标准差
+    # Var(X) = E[X²] - E[X]²
+    rolling_mean_sq = np.convolve(values ** 2, kernel, mode='same')
+    rolling_var = rolling_mean_sq - rolling_mean ** 2
+    # 确保方差非负（数值稳定性）
+    rolling_std = np.sqrt(np.maximum(rolling_var, 0))
+
+    # EMA 平滑
+    smoothed_mean = smooth_curve(rolling_mean, smoothing)
+    smoothed_std = smooth_curve(rolling_std, smoothing)
+
+    return smoothed_mean - smoothed_std, smoothed_mean + smoothed_std, smoothed_mean
 
 
 def plot_metric(
-    x: list, 
-    y: list, 
-    xlabel: str, 
-    ylabel: str, 
-    title: str, 
+    x: list,
+    y: list,
+    xlabel: str,
+    ylabel: str,
+    title: str,
     output_path: str,
     color: str = COLORS['primary'],
     smoothing: float = 0.9,
@@ -106,7 +122,7 @@ def plot_metric(
 ) -> None:
     """
     绘制单个指标的学术风格曲线图。
-    
+
     Args:
         x: x轴数据
         y: y轴数据
@@ -122,38 +138,37 @@ def plot_metric(
     """
     with plt.style.context('seaborn-v0_8-whitegrid'):
         plt.rcParams.update(ACADEMIC_STYLE)
-        
+
         fig, ax = plt.subplots()
         x_arr = np.array(x)
         y_arr = np.array(y)
-        
+
         # 绘制原始数据点（半透明）
         if show_raw and len(y_arr) > 1:
             ax.scatter(x_arr, y_arr, alpha=0.15, s=15, color=color, label='_nolegend_')
-        
-        # 绘制误差带
+
+        # 绘制误差带和平滑曲线（确保两者来源一致）
         if show_error_band and len(y_arr) > window_size:
-            lower, upper = compute_error_band(y_arr, window_size)
+            lower, upper, smoothed_y = compute_error_band(y_arr, window_size, smoothing)
             ax.fill_between(x_arr, lower, upper, alpha=0.2, color=color, label='±1 Std Dev')
-        
-        # 绘制平滑曲线
-        if len(y_arr) > 1:
+            ax.plot(x_arr, smoothed_y, color=color, linewidth=2.5, label='Smoothed')
+        elif len(y_arr) > 1:
             smoothed_y = smooth_curve(y_arr, smoothing)
             ax.plot(x_arr, smoothed_y, color=color, linewidth=2.5, label='Smoothed')
         else:
             ax.plot(x_arr, y_arr, color=color, linewidth=2.5)
-        
+
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
         ax.set_title(title, fontweight='bold', pad=10)
-        
+
         # x轴使用整数刻度
         ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-        
+
         # 添加图例
         if show_error_band and len(y_arr) > window_size:
             ax.legend(loc='best', fancybox=True, shadow=False)
-        
+
         plt.tight_layout()
         plt.savefig(output_path, dpi=300, facecolor='white', edgecolor='none')
         plt.close()
@@ -168,49 +183,70 @@ def plot_metric_comparison(
     ylabel2: str,
     title: str,
     output_path: str,
-    smoothing: float = 0.9
+    smoothing: float = 0.9,
+    window_size: int = 10
 ) -> None:
     """
     绘制两个指标的对比图（双y轴）。
+
+    Args:
+        x: x轴数据
+        y1: 第一个指标的y轴数据
+        y2: 第二个指标的y轴数据
+        xlabel: x轴标签
+        ylabel1: 第一个y轴标签
+        ylabel2: 第二个y轴标签
+        title: 图标题
+        output_path: 输出文件路径
+        smoothing: EMA平滑权重
+        window_size: 误差带计算窗口大小
     """
     with plt.style.context('seaborn-v0_8-whitegrid'):
         plt.rcParams.update(ACADEMIC_STYLE)
-        
+
         fig, ax1 = plt.subplots()
         x_arr = np.array(x)
         y1_arr = np.array(y1)
         y2_arr = np.array(y2)
-        
+
         # 第一个指标
         color1 = COLORS['primary']
         ax1.set_xlabel(xlabel)
         ax1.set_ylabel(ylabel1, color=color1)
-        if len(y1_arr) > 1:
+        if len(y1_arr) > window_size:
+            lower1, upper1, smoothed_y1 = compute_error_band(y1_arr, window_size, smoothing)
+            ax1.plot(x_arr, smoothed_y1, color=color1, linewidth=2.5, label=ylabel1)
+            ax1.fill_between(x_arr, lower1, upper1, alpha=0.15, color=color1)
+        elif len(y1_arr) > 1:
             smoothed_y1 = smooth_curve(y1_arr, smoothing)
             ax1.plot(x_arr, smoothed_y1, color=color1, linewidth=2.5, label=ylabel1)
-            lower1, upper1 = compute_error_band(y1_arr)
-            ax1.fill_between(x_arr, lower1, upper1, alpha=0.15, color=color1)
+        else:
+            ax1.plot(x_arr, y1_arr, color=color1, linewidth=2.5, label=ylabel1)
         ax1.tick_params(axis='y', labelcolor=color1)
-        
+
         # 第二个指标（共享x轴）
         ax2 = ax1.twinx()
         color2 = COLORS['secondary']
         ax2.set_ylabel(ylabel2, color=color2)
-        if len(y2_arr) > 1:
+        if len(y2_arr) > window_size:
+            lower2, upper2, smoothed_y2 = compute_error_band(y2_arr, window_size, smoothing)
+            ax2.plot(x_arr, smoothed_y2, color=color2, linewidth=2.5, linestyle='--', label=ylabel2)
+            ax2.fill_between(x_arr, lower2, upper2, alpha=0.15, color=color2)
+        elif len(y2_arr) > 1:
             smoothed_y2 = smooth_curve(y2_arr, smoothing)
             ax2.plot(x_arr, smoothed_y2, color=color2, linewidth=2.5, linestyle='--', label=ylabel2)
-            lower2, upper2 = compute_error_band(y2_arr)
-            ax2.fill_between(x_arr, lower2, upper2, alpha=0.15, color=color2)
+        else:
+            ax2.plot(x_arr, y2_arr, color=color2, linewidth=2.5, linestyle='--', label=ylabel2)
         ax2.tick_params(axis='y', labelcolor=color2)
-        
+
         ax1.set_title(title, fontweight='bold', pad=10)
         ax1.xaxis.set_major_locator(MaxNLocator(integer=True))
-        
+
         # 合并图例
         lines1, labels1 = ax1.get_legend_handles_labels()
         lines2, labels2 = ax2.get_legend_handles_labels()
         ax1.legend(lines1 + lines2, labels1 + labels2, loc='best')
-        
+
         fig.tight_layout()
         plt.savefig(output_path, dpi=300, facecolor='white', edgecolor='none')
         plt.close()
@@ -284,11 +320,11 @@ def generate_plots(
     
     # 指标配置
     metric_config = {
-        "reward": {"ylabel": "Cumulative Reward", "color": COLORS['primary']},
+        "reward": {"ylabel": "Average Team Reward (per step)", "color": COLORS['primary']},
         "latency": {"ylabel": "Average Latency (s)", "color": COLORS['secondary']},
-        "energy": {"ylabel": "Energy Consumption (J)", "color": COLORS['tertiary']},
+        "energy": {"ylabel": "Average Energy Consumption (J)", "color": COLORS['tertiary']},
         "fairness": {"ylabel": "Jain's Fairness Index", "color": COLORS['success']},
-        "rate": {"ylabel": "System Throughput (bps)", "color": COLORS['quaternary']},
+        "rate": {"ylabel": "Average System Throughput (bps)", "color": COLORS['quaternary']},
     }
     
     # 绘制单指标曲线
@@ -304,7 +340,7 @@ def generate_plots(
     # 绘制对比图：Reward + Fairness
     plot_metric_comparison(
         x_data, metrics_data["reward"], metrics_data["fairness"],
-        x_label, "Cumulative Reward", "Fairness Index",
+        x_label, "Average Team Reward (per step)", "Fairness Index",
         "Reward and Fairness Convergence",
         os.path.join(output_dir, f"{output_file_prefix}_reward_fairness_{timestamp}.png"),
         smoothing=smoothing

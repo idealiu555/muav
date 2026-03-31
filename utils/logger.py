@@ -81,8 +81,6 @@ class Logger:
         energies_slice: np.ndarray = np.array(log.energies[-log_freq:])
         fairness_slice: np.ndarray = np.array(log.fairness_scores[-log_freq:])
         rates_slice: np.ndarray = np.array(log.rates[-log_freq:])
-        collisions_slice: np.ndarray = np.array(log.collisions[-log_freq:])
-        boundaries_slice: np.ndarray = np.array(log.boundaries[-log_freq:])
 
         reward_avg: float = float(np.mean(rewards_slice))
         reward_std: float = float(np.std(rewards_slice))
@@ -92,18 +90,19 @@ class Logger:
         energy_std: float = float(np.std(energies_slice))
         fairness_avg: float = float(np.mean(fairness_slice))
         rate_avg: float = float(np.mean(rates_slice))
-        collisions_sum: int = int(np.sum(collisions_slice))
-        boundaries_sum: int = int(np.sum(boundaries_slice))
+        rate_std: float = float(np.std(rates_slice))
+        collisions_latest: int = int(log.collisions[-1]) if log.collisions else 0
+        boundaries_latest: int = int(log.boundaries[-1]) if log.boundaries else 0
 
         log_msg: str = (
             f"🔄 {name.title()} {progress_step} | "
-            f"Reward: {reward_avg:.3f}±{reward_std:.3f} | "
+            f"Team Reward: {reward_avg:.3f}±{reward_std:.3f} | "
             f"Lat: {latency_avg:.1f}±{latency_std:.1f} | "
             f"Eng: {energy_avg:.1f}±{energy_std:.1f} | "
             f"JFI: {fairness_avg:.3f} | "
-            f"Rate: {rate_avg:.1f} | "
-            f"Col: {collisions_sum} | "
-            f"Bnd: {boundaries_sum} | "
+            f"Rate: {rate_avg:.1f}±{rate_std:.1f} | "
+            f"Col: {collisions_latest} | "
+            f"Bnd: {boundaries_latest} | "
             f"Time: {elapsed_time:.2f}s\n"
         )
 
@@ -120,8 +119,9 @@ class Logger:
             "energy_std": energy_std,
             "fairness": fairness_avg,
             "rate": rate_avg,
-            "collisions": collisions_sum,
-            "boundaries": boundaries_sum,
+            "rate_std": rate_std,
+            "collisions": collisions_latest,
+            "boundaries": boundaries_latest,
             "time": elapsed_time
         }
         
