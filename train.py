@@ -148,25 +148,24 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
         if update % 100 == 0:
             generate_plots_if_available(logger.json_file_path, f"train_plots/{config.MODEL}/", "train", logger.timestamp)
         if update % save_freq == 0 and update < num_updates:
-            total_steps = update * config.PPO_ROLLOUT_LENGTH
-            save_models(model, update, "update", logger.timestamp, total_steps=total_steps)
+            save_models(model, update, "update", logger.timestamp)
 
-    total_steps = num_updates * config.PPO_ROLLOUT_LENGTH
-    save_models(model, -1, "update", logger.timestamp, final=True, total_steps=total_steps)
+    save_models(model, -1, "update", logger.timestamp, final=True)
 
 
-def train_off_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: int, total_step_count: int) -> None:
+def train_off_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: int) -> None:
     start_time: float = time.time()
     buffer: ReplayBuffer = ReplayBuffer(config.REPLAY_BUFFER_SIZE)
     save_freq: int = num_episodes // 10
     if num_episodes < 1000:
         save_freq = 100
     episode_log: Log = Log()
-    
+
     # Track training statistics
     training_stats_accumulator: dict = {}
     update_count: int = 0
     action_accumulator: list = []
+    total_step_count: int = 0
 
     for episode in range(1, num_episodes + 1):
         obs = env.reset()
@@ -275,9 +274,9 @@ def train_off_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: i
         if episode % 100 == 0:
             generate_plots_if_available(logger.json_file_path, f"train_plots/{config.MODEL}/", "train", logger.timestamp)
         if episode % save_freq == 0 and episode < num_episodes:
-            save_models(model, episode, "episode", logger.timestamp, total_steps=total_step_count)
+            save_models(model, episode, "episode", logger.timestamp)
 
-    save_models(model, -1, "episode", logger.timestamp, final=True, total_steps=total_step_count)
+    save_models(model, -1, "episode", logger.timestamp, final=True)
 
 
 def train_random(env: Env, model: MARLModel, logger: Logger, num_episodes: int) -> None:

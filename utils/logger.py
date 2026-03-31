@@ -63,17 +63,16 @@ class Logger:
         print(f"📝 Configs saved to {self.config_file_path}")
 
     def load_configs(self, config_path: str) -> None:
+        """Load configs for testing - uses saved config from training."""
         if not os.path.exists(config_path):
             raise FileNotFoundError(f"❌ Config file not found: {config_path}")
         with open(config_path, "r") as f:
             config_dict = json.load(f)
         for key, value in config_dict.items():
-            # Convert lists back to numpy arrays where appropriate
             if isinstance(getattr(default_config, key, None), np.ndarray):
                 setattr(default_config, key, np.array(value))
             else:
                 setattr(default_config, key, value)
-
         print(f"✅ Configs loaded from {config_path}")
 
     def log_metrics(self, progress_step: int, log: Log, log_freq: int, elapsed_time: float, name: str, training_stats: dict | None = None) -> None:
