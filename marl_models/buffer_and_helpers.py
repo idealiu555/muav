@@ -139,10 +139,6 @@ class RolloutBuffer:
         # Broadcast single value to all agent samples: (num_steps, 1) -> (num_steps * num_agents,)
         values: np.ndarray = np.repeat(self.values[:num_steps], self.num_agents, axis=0).squeeze(-1)
         active_masks: np.ndarray = self.active_masks[:num_steps].reshape(-1)
-        # Create agent indices array to track which agent each sample belongs to
-        # When we reshape (buffer_size, num_agents) to (buffer_size * num_agents,)
-        # the pattern is: [agent0, agent1, ..., agentN, agent0, agent1, ..., agentN, ...]
-        agent_indices: np.ndarray = np.tile(np.arange(self.num_agents), num_steps)
 
         indices: np.ndarray = np.random.permutation(num_samples)
         
@@ -155,7 +151,6 @@ class RolloutBuffer:
         returns_tensor: torch.Tensor = torch.from_numpy(returns).to(self.device, non_blocking=True)
         values_tensor: torch.Tensor = torch.from_numpy(values).to(self.device, non_blocking=True)
         active_masks_tensor: torch.Tensor = torch.from_numpy(active_masks).to(self.device, non_blocking=True)
-        agent_indices_tensor: torch.Tensor = torch.from_numpy(agent_indices).to(self.device, non_blocking=True)
 
         for start in range(0, num_samples, batch_size):
             end: int = start + batch_size
@@ -171,7 +166,6 @@ class RolloutBuffer:
                 "returns": returns_tensor[batch_idx_tensor],
                 "old_values": values_tensor[batch_idx_tensor],
                 "active_mask": active_masks_tensor[batch_idx_tensor],
-                "agent_indices": agent_indices_tensor[batch_idx_tensor],
             }
 
     def clear(self) -> None:

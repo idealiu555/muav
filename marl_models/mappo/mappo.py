@@ -55,10 +55,11 @@ class MAPPO(MARLModel):
 
             if state_tensor.dim() == 1:
                 state_tensor = state_tensor.unsqueeze(0)
-            # Critic outputs single value V(s), squeeze to scalar
+            # Critic outputs single value V(s), convert to explicit scalar
             values: torch.Tensor = self.critics(state_tensor).squeeze(-1)  # (1,) single value
 
-        return actions.cpu().numpy(), log_probs.cpu().numpy(), values.cpu().numpy()
+        # Return explicit scalar value for consistent interface with RolloutBuffer
+        return actions.cpu().numpy(), log_probs.cpu().numpy(), values.cpu().numpy().item()
 
     def update(self, batch: ExperienceBatch, entropy_coef: float) -> dict:
         assert isinstance(batch, dict), "MAPPO expects OnPolicyExperienceBatch (dict)"
