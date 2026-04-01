@@ -40,7 +40,7 @@ class MAPPO(MARLModel):
 
         return actions.cpu().numpy()
 
-    def get_action_and_value(self, obs: np.ndarray, state: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def get_action_and_value(self, obs: np.ndarray, state: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
         """Sample actions and compute log-probs and values for PPO."""
         obs_tensor: torch.Tensor = torch.from_numpy(obs.astype(np.float32)).to(self.device, non_blocking=True)
         state_tensor: torch.Tensor = torch.from_numpy(state.astype(np.float32)).to(self.device, non_blocking=True)
@@ -55,10 +55,8 @@ class MAPPO(MARLModel):
 
             if state_tensor.dim() == 1:
                 state_tensor = state_tensor.unsqueeze(0)
-            # Critic outputs single value V(s), convert to explicit scalar
-            values: torch.Tensor = self.critics(state_tensor).squeeze(-1)  # (1,) single value
+            values: torch.Tensor = self.critics(state_tensor).squeeze(-1)
 
-        # Return explicit scalar value for consistent interface with RolloutBuffer
         return actions.cpu().numpy(), log_probs.cpu().numpy(), values.cpu().numpy().item()
 
     def update(self, batch: ExperienceBatch, entropy_coef: float) -> dict:
@@ -71,7 +69,6 @@ class MAPPO(MARLModel):
         states_batch: torch.Tensor = batch["states"]
         old_values_batch: torch.Tensor = batch["old_values"]
         active_mask_batch: torch.Tensor = batch["active_mask"]
-        # agent_indices_batch removed - no longer needed for value extraction
 
         actor_mask: torch.Tensor = active_mask_batch.float()
         actor_mask_bool: torch.Tensor = actor_mask.bool()
@@ -122,7 +119,6 @@ class MAPPO(MARLModel):
         actor_loss = actor_loss - entropy_coef * entropy
 
         # Critic Loss (masked)
-        batch_size = states_batch.shape[0]
         # Critic outputs single value per state
         values_all: torch.Tensor = self.critics(states_batch)  # (batch, 1)
         values: torch.Tensor = values_all.squeeze(-1)  # (batch,) - direct use, no indexing needed

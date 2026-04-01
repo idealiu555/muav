@@ -59,7 +59,7 @@ class RolloutBuffer:
         self.actions: np.ndarray = np.zeros((buffer_size, num_agents, action_dim), dtype=np.float32)
         self.log_probs: np.ndarray = np.zeros((buffer_size, num_agents), dtype=np.float32)
         self.rewards: np.ndarray = np.zeros((buffer_size, num_agents), dtype=np.float32)
-        self.values: np.ndarray = np.zeros((buffer_size, 1), dtype=np.float32)  # 改为 (buffer_size, 1) 单值存储
+        self.values: np.ndarray = np.zeros((buffer_size, 1), dtype=np.float32)  # single V(s) per step
         self.active_masks: np.ndarray = np.zeros((buffer_size, num_agents), dtype=np.float32)
 
         # For on-policy return/advantage calculation
@@ -75,7 +75,7 @@ class RolloutBuffer:
         actions: np.ndarray,
         log_probs: np.ndarray,
         rewards: list[float],
-        values: float,  # 现在接收单值 scalar
+        values: float,  # single V(s) value
         active_mask: np.ndarray,
     ) -> None:
         if self.step >= self.buffer_size:
@@ -85,7 +85,7 @@ class RolloutBuffer:
         self.actions[self.step] = actions
         self.log_probs[self.step] = log_probs
         self.rewards[self.step] = np.array(rewards)
-        self.values[self.step, 0] = values  # 存储单值到 (1,) 维度
+        self.values[self.step, 0] = values
         self.active_masks[self.step] = active_mask.astype(np.float32, copy=False)
 
         self.step += 1
@@ -105,16 +105,16 @@ class RolloutBuffer:
         for t in reversed(range(num_steps)):
             # Episode termination: all agents bootstrap from 0
             if t == num_steps - 1:
-                next_values: float = 0.0  # 单值
+                next_values: float = 0.0
                 next_non_terminal: np.ndarray = np.zeros(self.num_agents, dtype=np.float32)
             else:
-                next_values = self.values[t + 1, 0]  # 提取单值
+                next_values = self.values[t + 1, 0]
                 # Agent is non-terminal if it was active at t AND remains active at t+1
                 next_non_terminal = self.active_masks[t] * self.active_masks[t + 1]
 
             # TD residual: delta = r + gamma * V_next * non_terminal - V
             # Broadcasting: rewards[t] (num_agents,) + scalar - scalar -> (num_agents,)
-            current_value: float = self.values[t, 0]  # 提取单值
+            current_value: float = self.values[t, 0]
             delta: np.ndarray = self.rewards[t] + gamma * next_values * next_non_terminal - current_value
 
             # GAE: A_t = delta_t + gamma * lambda * A_{t+1} * non_terminal
