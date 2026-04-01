@@ -16,7 +16,7 @@ class MAPPO(MARLModel):
 
         # Create networks
         self.actors: ActorNetwork = ActorNetwork(obs_dim, action_dim).to(device)
-        self.critics: CriticNetwork = CriticNetwork(state_dim, num_agents).to(device)
+        self.critics: CriticNetwork = CriticNetwork(state_dim).to(device)  # Removed num_agents parameter
 
         # Create optimizers
         self.actor_optimizer: torch.optim.AdamW = torch.optim.AdamW(self.actors.parameters(), lr=config.ACTOR_LR)
@@ -55,7 +55,8 @@ class MAPPO(MARLModel):
 
             if state_tensor.dim() == 1:
                 state_tensor = state_tensor.unsqueeze(0)
-            values: torch.Tensor = self.critics(state_tensor).squeeze(0)
+            # Critic outputs single value V(s), squeeze to scalar
+            values: torch.Tensor = self.critics(state_tensor).squeeze(-1)  # (1,) single value
 
         return actions.cpu().numpy(), log_probs.cpu().numpy(), values.cpu().numpy()
 
@@ -69,7 +70,7 @@ class MAPPO(MARLModel):
         states_batch: torch.Tensor = batch["states"]
         old_values_batch: torch.Tensor = batch["old_values"]
         active_mask_batch: torch.Tensor = batch["active_mask"]
-        agent_indices_batch: torch.Tensor = batch["agent_indices"]
+        # agent_indices_batch removed - no longer needed for value extraction
 
         actor_mask: torch.Tensor = active_mask_batch.float()
         actor_mask_bool: torch.Tensor = actor_mask.bool()
@@ -121,8 +122,9 @@ class MAPPO(MARLModel):
 
         # Critic Loss (masked)
         batch_size = states_batch.shape[0]
-        values_all: torch.Tensor = self.critics(states_batch)
-        values: torch.Tensor = values_all[torch.arange(batch_size, device=values_all.device), agent_indices_batch]
+        # Critic outputs single value per state
+        values_all: torch.Tensor = self.critics(states_batch)  # (batch, 1)
+        values: torch.Tensor = values_all.squeeze(-1)  # (batch,) - direct use, no indexing needed
         values_clipped: torch.Tensor = old_values_batch + torch.clamp(values - old_values_batch, -config.PPO_VALUE_CLIP_EPS, config.PPO_VALUE_CLIP_EPS)
         vf_loss1: torch.Tensor = (values - returns_batch).pow(2)
         vf_loss2: torch.Tensor = (values_clipped - returns_batch).pow(2)
