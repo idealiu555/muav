@@ -59,7 +59,7 @@ class RolloutBuffer:
         self.actions: np.ndarray = np.zeros((buffer_size, num_agents, action_dim), dtype=np.float32)
         self.log_probs: np.ndarray = np.zeros((buffer_size, num_agents), dtype=np.float32)
         self.rewards: np.ndarray = np.zeros((buffer_size, num_agents), dtype=np.float32)
-        self.values: np.ndarray = np.zeros((buffer_size, num_agents), dtype=np.float32)
+        self.values: np.ndarray = np.zeros((buffer_size, 1), dtype=np.float32)  # 改为 (buffer_size, 1) 单值存储
         self.active_masks: np.ndarray = np.zeros((buffer_size, num_agents), dtype=np.float32)
 
         # For on-policy return/advantage calculation
@@ -75,7 +75,7 @@ class RolloutBuffer:
         actions: np.ndarray,
         log_probs: np.ndarray,
         rewards: list[float],
-        values: np.ndarray,
+        values: float,  # 现在接收单值 scalar
         active_mask: np.ndarray,
     ) -> None:
         if self.step >= self.buffer_size:
@@ -85,7 +85,7 @@ class RolloutBuffer:
         self.actions[self.step] = actions
         self.log_probs[self.step] = log_probs
         self.rewards[self.step] = np.array(rewards)
-        self.values[self.step] = values
+        self.values[self.step, 0] = values  # 存储单值到 (1,) 维度
         self.active_masks[self.step] = active_mask.astype(np.float32, copy=False)
 
         self.step += 1
@@ -96,6 +96,8 @@ class RolloutBuffer:
         For each agent, termination (transitioning from active to inactive) is treated
         as a terminal state where next_value = 0 for bootstrapping.
         GAE propagation stops for inactive agents via mask multiplication.
+
+        Note: values[t] is a single scalar V(s), broadcast to all agents for GAE.
         """
         num_steps = self.step
         last_gae_lam: np.ndarray = np.zeros(self.num_agents, dtype=np.float32)
@@ -103,23 +105,25 @@ class RolloutBuffer:
         for t in reversed(range(num_steps)):
             # Episode termination: all agents bootstrap from 0
             if t == num_steps - 1:
-                next_values: np.ndarray = np.zeros(self.num_agents, dtype=np.float32)
+                next_values: float = 0.0  # 单值
                 next_non_terminal: np.ndarray = np.zeros(self.num_agents, dtype=np.float32)
             else:
-                next_values = self.values[t + 1]
+                next_values = self.values[t + 1, 0]  # 提取单值
                 # Agent is non-terminal if it was active at t AND remains active at t+1
                 next_non_terminal = self.active_masks[t] * self.active_masks[t + 1]
 
             # TD residual: delta = r + gamma * V_next * non_terminal - V
-            delta: np.ndarray = self.rewards[t] + gamma * next_values * next_non_terminal - self.values[t]
+            # Broadcasting: rewards[t] (num_agents,) + scalar - scalar -> (num_agents,)
+            current_value: float = self.values[t, 0]  # 提取单值
+            delta: np.ndarray = self.rewards[t] + gamma * next_values * next_non_terminal - current_value
 
             # GAE: A_t = delta_t + gamma * lambda * A_{t+1} * non_terminal
             # The mask stops GAE propagation for terminated/inactive agents
             last_gae_lam = delta + gamma * gae_lambda * last_gae_lam * next_non_terminal
             self.advantages[t] = last_gae_lam
 
-        # Returns = advantages + values (standard GAE target)
-        self.returns[:num_steps] = self.advantages[:num_steps] + self.values[:num_steps]
+        # Returns = advantages + values (broadcast single value to all agents)
+        self.returns[:num_steps] = self.advantages[:num_steps] + self.values[:num_steps, 0:1]
 
     def get_batches(self, batch_size: int) -> Generator[dict[str, torch.Tensor], None, None]:
         """A generator that yields mini-batches from the buffer."""
@@ -132,7 +136,8 @@ class RolloutBuffer:
         log_probs: np.ndarray = self.log_probs[:num_steps].reshape(-1)
         advantages: np.ndarray = self.advantages[:num_steps].reshape(-1)
         returns: np.ndarray = self.returns[:num_steps].reshape(-1)
-        values: np.ndarray = self.values[:num_steps].reshape(-1)
+        # Broadcast single value to all agent samples: (num_steps, 1) -> (num_steps * num_agents,)
+        values: np.ndarray = np.repeat(self.values[:num_steps], self.num_agents, axis=0).squeeze(-1)
         active_masks: np.ndarray = self.active_masks[:num_steps].reshape(-1)
         # Create agent indices array to track which agent each sample belongs to
         # When we reshape (buffer_size, num_agents) to (buffer_size * num_agents,)
