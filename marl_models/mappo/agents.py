@@ -34,16 +34,16 @@ class ActorNetwork(nn.Module):
 
 
 class CriticNetwork(nn.Module):
-    def __init__(self, state_dim: int, num_agents: int) -> None:
+    def __init__(self, state_dim: int) -> None:
         super(CriticNetwork, self).__init__()
         self.fc1: nn.Linear = layer_init(nn.Linear(state_dim, config.MLP_HIDDEN_DIM))
         self.ln1: nn.LayerNorm = nn.LayerNorm(config.MLP_HIDDEN_DIM)
         self.fc2: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, config.MLP_HIDDEN_DIM))
         self.ln2: nn.LayerNorm = nn.LayerNorm(config.MLP_HIDDEN_DIM)
-        # Output independent value for each agent based on global state
-        self.out: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, num_agents))
+        # Output single value V(s) from global state
+        self.out: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, 1))
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         x: torch.Tensor = torch.relu(self.ln1(self.fc1(state)))
         x = torch.relu(self.ln2(self.fc2(x)))
-        return self.out(x)
+        return self.out(x)  # returns (batch, 1)
