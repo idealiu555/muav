@@ -58,7 +58,7 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
                 plot_snapshot(env, update, step, logger.log_dir, "update", logger.timestamp)
 
             obs_arr: np.ndarray = np.array(obs)
-            actions, log_probs, values, pre_tanh_actions = model.get_action_and_value(obs_arr, state)
+            actions, log_probs, values = model.get_action_and_value(obs_arr, state)
 
             next_obs, rewards, (total_latency, total_energy, jfi, total_rate, reward_stats, step_collisions, step_boundaries), _step_info = env.step(actions)
             _append_active_actions(action_accumulator, actions, _step_info["active_mask"])
@@ -66,7 +66,7 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
             buffer.add(
                 state,
                 obs_arr,
-                pre_tanh_actions,
+                actions,
                 log_probs,
                 rewards,
                 values,
@@ -97,7 +97,6 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
             min(update / num_updates, 1.0)
 
         for _ in range(config.PPO_EPOCHS):
-            epoch_kl_exceeded: bool = False
             for batch in buffer.get_batches(config.PPO_BATCH_SIZE):
                 stats = model.update(batch, entropy_coef)
                 if stats:
@@ -105,12 +104,6 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
                         if key not in training_stats_accumulator:
                             training_stats_accumulator[key] = []
                         training_stats_accumulator[key].append(value)
-                    # KL early stopping - stop all remaining epochs for this rollout
-                    if stats.get("approx_kl", 0) > config.PPO_KL_THRESHOLD:
-                        epoch_kl_exceeded = True
-                        break
-            if epoch_kl_exceeded:
-                break
 
         buffer.clear()
 

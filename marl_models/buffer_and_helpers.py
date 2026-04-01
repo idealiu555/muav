@@ -56,7 +56,7 @@ class RolloutBuffer:
         # Initialize storage
         self.states: np.ndarray = np.zeros((buffer_size, state_dim), dtype=np.float32)
         self.observations: np.ndarray = np.zeros((buffer_size, num_agents, obs_dim), dtype=np.float32)
-        self.pre_tanh_actions: np.ndarray = np.zeros((buffer_size, num_agents, action_dim), dtype=np.float32)
+        self.actions: np.ndarray = np.zeros((buffer_size, num_agents, action_dim), dtype=np.float32)
         self.log_probs: np.ndarray = np.zeros((buffer_size, num_agents), dtype=np.float32)
         self.rewards: np.ndarray = np.zeros((buffer_size, num_agents), dtype=np.float32)
         self.values: np.ndarray = np.zeros((buffer_size, num_agents), dtype=np.float32)
@@ -72,7 +72,7 @@ class RolloutBuffer:
         self,
         state: np.ndarray,
         obs: np.ndarray,
-        pre_tanh_actions: np.ndarray,
+        actions: np.ndarray,
         log_probs: np.ndarray,
         rewards: list[float],
         values: np.ndarray,
@@ -82,7 +82,7 @@ class RolloutBuffer:
             raise ValueError("Rollout buffer overflow")
         self.states[self.step] = state
         self.observations[self.step] = obs
-        self.pre_tanh_actions[self.step] = pre_tanh_actions
+        self.actions[self.step] = actions
         self.log_probs[self.step] = log_probs
         self.rewards[self.step] = np.array(rewards)
         self.values[self.step] = values
@@ -128,7 +128,7 @@ class RolloutBuffer:
 
         states: np.ndarray = np.repeat(self.states[:num_steps], self.num_agents, axis=0)
         obs: np.ndarray = self.observations[:num_steps].reshape(-1, self.obs_dim)
-        pre_tanh_actions: np.ndarray = self.pre_tanh_actions[:num_steps].reshape(-1, self.pre_tanh_actions.shape[-1])
+        actions: np.ndarray = self.actions[:num_steps].reshape(-1, self.actions.shape[-1])
         log_probs: np.ndarray = self.log_probs[:num_steps].reshape(-1)
         advantages: np.ndarray = self.advantages[:num_steps].reshape(-1)
         returns: np.ndarray = self.returns[:num_steps].reshape(-1)
@@ -144,7 +144,7 @@ class RolloutBuffer:
         # Pre-convert all data to tensors on GPU for faster batching
         states_tensor: torch.Tensor = torch.from_numpy(states).to(self.device, non_blocking=True)
         obs_tensor: torch.Tensor = torch.from_numpy(obs).to(self.device, non_blocking=True)
-        pre_tanh_actions_tensor: torch.Tensor = torch.from_numpy(pre_tanh_actions).to(self.device, non_blocking=True)
+        actions_tensor: torch.Tensor = torch.from_numpy(actions).to(self.device, non_blocking=True)
         log_probs_tensor: torch.Tensor = torch.from_numpy(log_probs).to(self.device, non_blocking=True)
         advantages_tensor: torch.Tensor = torch.from_numpy(advantages).to(self.device, non_blocking=True)
         returns_tensor: torch.Tensor = torch.from_numpy(returns).to(self.device, non_blocking=True)
@@ -160,7 +160,7 @@ class RolloutBuffer:
             yield {
                 "states": states_tensor[batch_idx_tensor],
                 "obs": obs_tensor[batch_idx_tensor],
-                "pre_tanh_actions": pre_tanh_actions_tensor[batch_idx_tensor],
+                "actions": actions_tensor[batch_idx_tensor],
                 "old_log_probs": log_probs_tensor[batch_idx_tensor],
                 "advantages": advantages_tensor[batch_idx_tensor],
                 "returns": returns_tensor[batch_idx_tensor],
