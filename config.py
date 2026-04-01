@@ -46,9 +46,9 @@ FAIRNESS_WINDOW_SIZE: int = 100  # 公平性计算的滑动窗口大小（最近
 # Collision Avoidance and Penalties
 UNSAFE_UAV_DISTANCE: float = 50.0
 COLLISION_DISTANCE: float = 5.0
-UNSAFE_PROXIMITY_PENALTY: float = 6.0
-COLLISION_FAILURE_PENALTY: float = 20.0
-BOUNDARY_PENALTY: float = 2.5
+UNSAFE_PROXIMITY_PENALTY: float = 4.0
+COLLISION_FAILURE_PENALTY: float = 10.0
+BOUNDARY_PENALTY: float = 2.0
 NON_SERVED_LATENCY_PENALTY: float = 60.0  # penalty in latency for non-served requests
 # IMPORTANT : Reconfigurable, should try for various values including : NUM_UAVS - 1 and NUM_UES
 MAX_UAV_NEIGHBORS: int = min(4, NUM_UAVS - 1)
@@ -119,22 +119,23 @@ BEAM_OFFSET_RANGE: float = 30.0          # offset模式下的最大偏移范围 
 # Model Parameters
 
 # Reward weights for multi-objective optimization
-# 使用动态归一化后，各分量量级一致，权重直接表达优先级
-# 初始设为 1:1:1:1，可根据训练结果调整
-ALPHA_1: float = 1.05  # weightage for latency (penalty)
-ALPHA_2: float = 0.8  # weightage for energy (penalty)
-ALPHA_3: float = 1.2  # weightage for fairness/JFI (reward)
+# All weights set to 1.0, relying on SCALE to balance magnitude
+ALPHA_1: float = 1.0  # weightage for latency (penalty)
+ALPHA_2: float = 1.0  # weightage for energy (penalty)
+ALPHA_3: float = 1.0  # weightage for fairness/JFI (reward)
 ALPHA_RATE: float = 1.0  # weightage for system throughput (reward)
 REWARD_SCALING_FACTOR: float = 0.12  # scaling factor for rewards (归一化后保持原量级)
-LATENCY_REWARD_SCALE: float = NUM_UES * TIME_SLOT_DURATION
-ENERGY_REWARD_SCALE: float = NUM_UAVS * POWER_HOVER * TIME_SLOT_DURATION
-RATE_REWARD_SCALE: float = 1e8
 
-# JFI reward parameters
-JFI_BASELINE: float = 0.6  # JFI threshold: values above are rewarded, below are penalized
-JFI_SCALE: float = 5.0    # Scaling factor for JFI deviation from baseline
-JFI_CLIP_MIN: float = -2.0  # Minimum clipped JFI reward component
-JFI_CLIP_MAX: float = 2.0   # Maximum clipped JFI reward component
+# Balanced scales to make log1p(scaled) ≈ 1.5-2.0 for each component
+LATENCY_REWARD_SCALE: float = NUM_UES * TIME_SLOT_DURATION * 6  # ~600, scaled_latency ≈ 7
+ENERGY_REWARD_SCALE: float = NUM_UAVS * POWER_HOVER * TIME_SLOT_DURATION * 3  # ~150, scaled_energy ≈ 3.5
+RATE_REWARD_SCALE: float = 5e7  # scaled_rate ≈ 5-6
+
+# JFI reward parameters (balanced around midpoint)
+JFI_BASELINE: float = 0.6  # JFI midpoint: symmetric reward/penalty
+JFI_SCALE: float = 5.0    # Moderate scaling for JFI deviation
+JFI_CLIP_MIN: float = -2.0  # Narrower clip range
+JFI_CLIP_MAX: float = 2.0
 
 # UE state: pos(3) + file_id(1) + cache_hit(1) = 5
 UE_STATE_DIM: int = 5
@@ -186,12 +187,12 @@ NOISE_CLIP: float = 0.5  # range to clip target policy smoothing noise
 
 # MAPPO Specific Hyperparameters
 PPO_ROLLOUT_LENGTH: int = 1000  # number of steps to collect per rollout (Set to STEPS_PER_EPISODE for episodic tasks)
-PPO_EPOCHS: int = 4  # number of epochs to run on the collected rollout data (reduced from 10 to prevent overfitting)
+PPO_EPOCHS: int = 10  # number of epochs to run on the collected rollout data (aligned with official MAPPO best practices)
 PPO_BATCH_SIZE: int = 512  # size of mini-batches to use during the update step (increased from 64 for better GPU utilization)
 PPO_CLIP_EPS: float = 0.2  # clipping parameter (epsilon) for the PPO surrogate objective
 PPO_VALUE_CLIP_EPS: float = 0.2  # clipping parameter for value function (can be same or different from policy clip)
 PPO_ENTROPY_COEF_START: float = 0.01  # initial entropy coefficient (decays over training to prevent entropy explosion)
-PPO_ENTROPY_COEF_END: float = 0.002  # final entropy coefficient
+PPO_ENTROPY_COEF_END: float = 0.01  # final entropy coefficient
 PPO_GAE_LAMBDA: float = 0.95  # GAE lambda for lower-variance advantage estimation
 PPO_MAX_LOG_RATIO: float = 10.0  # clip log-ratio before exp to avoid numerical spikes
 

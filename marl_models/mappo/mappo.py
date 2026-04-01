@@ -87,6 +87,8 @@ class MAPPO(MARLModel):
                 "critic_grad_norm": 0.0,
                 "value_mean": 0.0,
                 "valid_samples": 0.0,
+                "log_std_mean": 0.0,
+                "log_std_std": 0.0,
             }
 
         # Advantage normalization (only on active agents)
@@ -139,6 +141,7 @@ class MAPPO(MARLModel):
         self.critic_optimizer.step()
 
         # Metrics
+        log_std_data: torch.Tensor = self.actors.log_std.data.squeeze(0)
         return {
             "actor_loss": actor_loss.item(),
             "critic_loss": critic_loss.item(),
@@ -149,6 +152,8 @@ class MAPPO(MARLModel):
             "critic_grad_norm": float(critic_grad_norm),
             "value_mean": masked_mean(values, actor_mask).item(),
             "valid_samples": float(valid_count),
+            "log_std_mean": log_std_data.mean().item(),
+            "log_std_std": log_std_data.std().item(),
         }
 
     def reset(self) -> None:
