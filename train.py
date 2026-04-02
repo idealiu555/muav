@@ -19,10 +19,6 @@ def _append_active_actions(action_accumulator: list[np.ndarray], actions: np.nda
         action_accumulator.append(active_actions)
 
 
-def _build_global_state(obs: list[np.ndarray]) -> np.ndarray:
-    return np.concatenate(obs, axis=0).astype(np.float32, copy=False)
-
-
 def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: int) -> None:
     start_time: float = time.time()
     if config.PPO_ROLLOUT_LENGTH != config.STEPS_PER_EPISODE:
@@ -34,7 +30,6 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
         num_agents=config.NUM_UAVS,
         obs_dim=config.OBS_DIM_SINGLE,
         action_dim=config.ACTION_DIM,
-        state_dim=config.STATE_DIM,
         buffer_size=config.PPO_ROLLOUT_LENGTH,
         device=model.device,
     )
@@ -53,7 +48,6 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
 
     for update in range(1, num_updates + 1):
         obs: list[np.ndarray] = env.reset()
-        global_state: np.ndarray = _build_global_state(obs)
         rollout_reward: float = 0.0
         rollout_latency: float = 0.0
         rollout_energy: float = 0.0
@@ -69,13 +63,12 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
                 plot_snapshot(env, update, step, logger.log_dir, "update", logger.timestamp)
 
             obs_arr: np.ndarray = np.array(obs)
-            env_actions, raw_actions, log_probs, values = model.get_action_and_value(obs_arr, global_state)
+            env_actions, raw_actions, log_probs, values = model.get_action_and_value(obs_arr)
 
             next_obs, rewards, (total_latency, total_energy, jfi, total_rate, reward_stats, step_collisions, step_boundaries), _step_info = env.step(env_actions)
             _append_active_actions(action_accumulator, env_actions, _step_info["active_mask"])
             # update_trajectories(env)  # tracking code, comment if not needed
             buffer.add(
-                global_state,
                 obs_arr,
                 raw_actions,
                 log_probs,
@@ -85,7 +78,6 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
             )
 
             obs = next_obs
-            global_state = _build_global_state(next_obs)
 
             rollout_reward += np.sum(rewards)
             rollout_latency += total_latency

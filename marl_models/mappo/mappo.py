@@ -1,7 +1,8 @@
-from marl_models.base_model import MARLModel, ExperienceBatch
-from marl_models.mappo.agents import ActorNetwork, CriticNetwork
-from marl_models.buffer_and_helpers import masked_mean
 import copy
+
+from marl_models.base_model import MARLModel
+from marl_models.mappo.agents import ActorNetwork, AttentionActorNetwork, AttentionCriticNetwork, CriticNetwork
+from marl_models.buffer_and_helpers import masked_mean
 import config
 import numpy as np
 import os
@@ -17,23 +18,83 @@ class MAPPO(MARLModel):
         num_agents: int,
         obs_dim: int,
         action_dim: int,
-        state_dim: int,
         device: str,
     ) -> None:
         super().__init__(model_name, num_agents, obs_dim, action_dim, device)
-        self.state_dim: int = state_dim
-        self.critic_input_dim: int = state_dim + num_agents
         self.active_flag_index: int = config.OWN_STATE_DIM - 1
 
-        # Create networks
-        self.actors: ActorNetwork = ActorNetwork(obs_dim, action_dim).to(device)
-        self.critics: CriticNetwork = CriticNetwork(self.critic_input_dim).to(device)
+        actor_cls = AttentionActorNetwork if config.USE_ATTENTION else ActorNetwork
+        critic_cls = AttentionCriticNetwork if config.USE_ATTENTION else CriticNetwork
+        self.use_attention: bool = actor_cls is AttentionActorNetwork
+
+        self.actors = actor_cls(obs_dim, action_dim).to(device)
+        self.critics = critic_cls(num_agents, obs_dim).to(device)
 
         # Create optimizers
         self.actor_optimizer: torch.optim.AdamW = torch.optim.AdamW(self.actors.parameters(), lr=config.ACTOR_LR)
         self.critic_optimizer: torch.optim.AdamW = torch.optim.AdamW(self.critics.parameters(), lr=config.CRITIC_LR)
         self.entropy_coef: float = config.PPO_ENTROPY_COEF_START
         self.entropy_mc_samples: int = config.PPO_ENTROPY_MC_SAMPLES
+
+    def _checkpoint_metadata(self) -> dict[str, object]:
+        return {
+            "model_name": self.model_name,
+            "use_attention": self.use_attention,
+            "num_agents": self.num_agents,
+            "obs_dim": self.obs_dim,
+            "action_dim": self.action_dim,
+        }
+
+    def _validate_checkpoint_metadata(self, metadata: object) -> None:
+        if metadata is None:
+            return
+        if not isinstance(metadata, dict):
+            raise ValueError("MAPPO checkpoint metadata must be a dict when present")
+
+        expected_values = {
+            "model_name": self.model_name,
+            "use_attention": self.use_attention,
+            "num_agents": self.num_agents,
+            "obs_dim": self.obs_dim,
+            "action_dim": self.action_dim,
+        }
+        for key, expected in expected_values.items():
+            actual = metadata.get(key)
+            if actual != expected:
+                raise ValueError(
+                    f"Incompatible MAPPO checkpoint metadata for {key}: expected {expected!r}, got {actual!r}"
+                )
+
+    def _load_checkpoint_state_atomically(
+        self,
+        actor_state: dict[str, torch.Tensor],
+        critic_state: dict[str, torch.Tensor],
+    ) -> None:
+        actor_backup = copy.deepcopy(self.actors.state_dict())
+        critic_backup = copy.deepcopy(self.critics.state_dict())
+        failing_component = "actor"
+        try:
+            self.actors.load_state_dict(actor_state)
+            failing_component = "critic"
+            self.critics.load_state_dict(critic_state)
+        except RuntimeError as exc:
+            self.actors.load_state_dict(actor_backup)
+            self.critics.load_state_dict(critic_backup)
+            error_text = str(exc)
+            compatibility_markers = (
+                "size mismatch",
+                "Missing key(s) in state_dict",
+                "Unexpected key(s) in state_dict",
+            )
+            if any(marker in error_text for marker in compatibility_markers):
+                raise ValueError(
+                    f"Incompatible MAPPO checkpoint {failing_component} state_dict: {error_text}"
+                ) from exc
+            raise
+        except Exception:
+            self.actors.load_state_dict(actor_backup)
+            self.critics.load_state_dict(critic_backup)
+            raise
 
     def _get_active_mask(self, obs: np.ndarray) -> torch.Tensor:
         active_mask_np = (obs[:, self.active_flag_index] >= 0.5).astype(np.float32)
@@ -77,9 +138,7 @@ class MAPPO(MARLModel):
 
         return actions.cpu().numpy()
 
-    def get_action_and_value(
-        self, obs: np.ndarray, global_state: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def get_action_and_value(self, obs: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Sample actions under the local bounded-action contract.
 
         The local environment expects normalized actions in [-1, 1], so MAPPO uses a
@@ -92,31 +151,19 @@ class MAPPO(MARLModel):
         if not np.all(np.isfinite(obs_arr)):
             raise ValueError("obs contains NaN or Inf values")
 
-        global_state_arr: np.ndarray = np.asarray(global_state, dtype=np.float32)
-        expected_global_state_shape: tuple[int] = (self.state_dim,)
-        if global_state_arr.shape != expected_global_state_shape:
-            raise ValueError(
-                f"Expected global_state shape {expected_global_state_shape}, got {global_state_arr.shape}"
-            )
-        if not np.all(np.isfinite(global_state_arr)):
-            raise ValueError("global_state contains NaN or Inf values")
-
         obs_tensor: torch.Tensor = torch.from_numpy(obs_arr).to(self.device, non_blocking=True)
-        global_state_tensor: torch.Tensor = torch.from_numpy(global_state_arr).to(self.device, non_blocking=True)
         active_mask: torch.Tensor = self._get_active_mask(obs)
         action_mask: torch.Tensor = active_mask.unsqueeze(1)
         agent_index: torch.Tensor = torch.arange(self.num_agents, device=self.device, dtype=torch.long)
-        critic_input: torch.Tensor = self._build_critic_input(
-            global_state_tensor.unsqueeze(0).expand(self.num_agents, -1),
-            agent_index,
-        )
+        critic_joint_obs: torch.Tensor = obs_tensor.unsqueeze(0)
+        critic_active_mask: torch.Tensor = active_mask.unsqueeze(0).bool()
 
         with torch.no_grad():
             dist: Normal = self.actors(obs_tensor)
             raw_actions: torch.Tensor = dist.sample()
             env_actions, log_probs = self._squashed_log_prob_from_raw_actions(dist, raw_actions)
             env_actions = env_actions * action_mask
-            values: torch.Tensor = self.critics(critic_input).squeeze(-1)
+            values: torch.Tensor = self.critics(critic_joint_obs, agent_index, critic_active_mask)
 
         return (
             env_actions.cpu().numpy(),
@@ -125,24 +172,22 @@ class MAPPO(MARLModel):
             values.cpu().numpy(),
         )
 
-    def _build_critic_input(self, global_state: torch.Tensor, agent_index: torch.Tensor) -> torch.Tensor:
-        agent_one_hot: torch.Tensor = F.one_hot(agent_index.long(), num_classes=self.num_agents).to(global_state.dtype)
-        return torch.cat((global_state, agent_one_hot), dim=-1)
-
     def _compute_entropy_coef(self, *, current_update: int, total_updates: int) -> float:
         progress = min(current_update / max(total_updates, 1), 1.0)
         return config.PPO_ENTROPY_COEF_START - (
             config.PPO_ENTROPY_COEF_START - config.PPO_ENTROPY_COEF_END
         ) * progress
 
-    def _update_minibatch(self, batch: ExperienceBatch) -> dict:
-        assert isinstance(batch, dict), "MAPPO expects OnPolicyExperienceBatch (dict)"
+    def _update_minibatch(self, batch: dict[str, torch.Tensor]) -> dict:
+        assert isinstance(batch, dict), "MAPPO expects dict batch"
         obs_batch: torch.Tensor = batch["obs"]
         raw_actions_batch: torch.Tensor = batch["raw_actions"]
         old_log_probs_batch: torch.Tensor = batch["old_log_probs"]
         advantages_batch: torch.Tensor = batch["advantages"]
         returns_batch: torch.Tensor = batch["returns"]
-        global_state_batch: torch.Tensor = batch["global_state"]
+        joint_obs_batch: torch.Tensor = batch["joint_obs"]
+        joint_active_mask_batch: torch.Tensor = batch["joint_active_mask"]
+        joint_obs_index_batch: torch.Tensor | None = batch.get("joint_obs_index")
         agent_index_batch: torch.Tensor = batch["agent_index"]
         old_values_batch: torch.Tensor = batch["old_values"]
         active_mask_batch: torch.Tensor = batch["active_mask"]
@@ -184,8 +229,12 @@ class MAPPO(MARLModel):
         actor_loss = actor_loss - self.entropy_coef * entropy
 
         # Critic Loss (masked)
-        critic_input_batch: torch.Tensor = self._build_critic_input(global_state_batch, agent_index_batch)
-        values: torch.Tensor = self.critics(critic_input_batch).squeeze(-1)
+        values: torch.Tensor = self.critics(
+            joint_obs_batch,
+            agent_index_batch,
+            joint_active_mask_batch,
+            sample_index=joint_obs_index_batch,
+        )
         values_clipped: torch.Tensor = old_values_batch + torch.clamp(values - old_values_batch, -config.PPO_VALUE_CLIP_EPS, config.PPO_VALUE_CLIP_EPS)
         vf_loss1: torch.Tensor = (values - returns_batch).pow(2)
         vf_loss2: torch.Tensor = (values_clipped - returns_batch).pow(2)
@@ -204,7 +253,7 @@ class MAPPO(MARLModel):
         self.critic_optimizer.step()
 
         # Metrics
-        log_std_data: torch.Tensor = self.actors.log_std.data.squeeze(0)
+        log_std_data: torch.Tensor = self.actors.policy.log_std.data.squeeze(0)
         return {
             "actor_loss": actor_loss.item(),
             "critic_loss": critic_loss.item(),
@@ -244,7 +293,7 @@ class MAPPO(MARLModel):
         averaged_stats["entropy_coef"] = self.entropy_coef
         return averaged_stats
 
-    def update(self, batch: ExperienceBatch) -> dict:
+    def update(self, batch: dict[str, torch.Tensor]) -> dict:
         return self._update_minibatch(batch)
 
     def reset(self) -> None:
@@ -253,6 +302,7 @@ class MAPPO(MARLModel):
     def save(self, directory: str) -> None:
         torch.save(
             {
+                "metadata": self._checkpoint_metadata(),
                 "actor": self.actors.state_dict(),
                 "critic": self.critics.state_dict(),
             },
@@ -264,31 +314,7 @@ class MAPPO(MARLModel):
         if not os.path.exists(path):
             raise FileNotFoundError(f"Model file not found: {path}")
         checkpoint: dict = torch.load(path, map_location=self.device)
-        actor_backup = copy.deepcopy(self.actors.state_dict())
-        critic_backup = copy.deepcopy(self.critics.state_dict())
-
-        critic_state_dict = checkpoint["critic"]
-        try:
-            self.actors.load_state_dict(checkpoint["actor"])
-            self.critics.load_state_dict(critic_state_dict)
-        except RuntimeError as exc:
-            self.actors.load_state_dict(actor_backup)
-            self.critics.load_state_dict(critic_backup)
-            error_text = str(exc)
-            compatibility_markers = (
-                "size mismatch",
-                "Missing key(s) in state_dict",
-                "Unexpected key(s) in state_dict",
-            )
-            if any(marker in error_text for marker in compatibility_markers):
-                raise ValueError(
-                    "MAPPO checkpoint critic input dimension is incompatible with the current "
-                    "agent-aware critic input. This model builds critic input as "
-                    "global_state + one_hot(agent_id). Original load error: "
-                    f"{error_text}"
-                ) from exc
-            raise
-        except Exception:
-            self.actors.load_state_dict(actor_backup)
-            self.critics.load_state_dict(critic_backup)
-            raise
+        if "actor" not in checkpoint or "critic" not in checkpoint:
+            raise ValueError("MAPPO checkpoint must contain both actor and critic state_dict entries")
+        self._validate_checkpoint_metadata(checkpoint.get("metadata"))
+        self._load_checkpoint_state_atomically(checkpoint["actor"], checkpoint["critic"])

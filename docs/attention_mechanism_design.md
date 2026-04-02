@@ -1,5 +1,7 @@
 # 注意力机制设计方案
 
+> 状态说明（2026-04-03 更新）：本文档已按当前代码实现校准。Attention 机制现已在 MADDPG 与 MAPPO 中落地，MATD3/MASAC 仍为无 attention 分支。最后更新时间：2026-04-02 实现，2026-04-03 文档验证。
+
 ## 1. 问题背景
 
 ### 原始问题：UE 观测截断
@@ -141,9 +143,16 @@ V (Value) - 来自 UE/Neighbor 特征:
 | Neighbor Attention | 64 | 64 | 2 | 32 |
 
 ### Mask 机制
-- 观测中包含 `neighbor_count` 和 `ue_count` 字段
-- 动态生成 mask：`mask[i] = 1 if i < count else 0`
-- Padding 位置的注意力分数设为 -inf，softmax 后为 0
+注意力机制广泛使用了 Mask 策略处理动态实体数量和环境失效：
+1. **实体动态数量 Mask（UE/邻居数量）**：
+   - 观测中包含 `neighbor_count` 和 `ue_count` 字段
+   - 动态生成 mask：`mask[i] = 1 if i < count else 0`
+    - 在 `CrossAttention` 中通过 `masked_fill(scores, mask==0, -inf)` 屏蔽 padding 位置，随后 `softmax` + `nan_to_num` 保证全 mask 行数值稳定。
+
+2. **活跃智能体 Mask（Active Mask）**：
+   - 在 Critic 的全局 Q 值评估聚合阶段（`AgentPoolingAttention`）不仅接受所有 Agent 状态，同时也接受 `active_mask` 指定的存活状态。
+   - `key_padding_mask` / token 屏蔽同时作用以避免失效 / 获取的填充代理干扰全局决策特征。
+   - 对失效实体组成的 batch 行引入全 inactive 兜底返回处理防止梯度和数值异常。
 
 ## 5. 完整编码器架构
 
@@ -192,12 +201,12 @@ V (Value) - 来自 UE/Neighbor 特征:
 | ATTENTION_NEIGHBOR_DIM | 64 | Neighbor 注意力维度 |
 | ATTENTION_NUM_HEADS | 2 | 多头注意力头数（UE/Neighbor attention）|
 
-### AgentPoolingAttention 参数（代码硬编码）
+### AgentPoolingAttention 参数（代码实际使用）
 | 参数 | 值 | 说明 |
 |------|-----|------|
 | encoder_dim | 256 | 输入编码维度 |
 | action_embed_dim | 64 | 动作嵌入维度 |
-| num_heads | 4 | Self-Attention 头数 |
+| num_heads | 4 | Self-Attention 头数（MADDPG 实例化时指定为 4，模块默认值为 8） |
 | head_dim | 80 | 每个头的维度 (320/4) |
 | FFN expansion | 2x | FFN 扩展比例 |
 
@@ -233,28 +242,28 @@ V (Value) - 来自 UE/Neighbor 特征:
 
 ## 8. 网络集成
 
-### ActorNetworkWithAttention
+### MADDPG ActorNetworkWithAttention
 ```
 obs [batch, 380]
   → AttentionEncoder → [batch, 256]
-  → Linear(256, 768) → LayerNorm → LeakyReLU(0.01)  # 正交初始化
-  → Linear(768, 768) → LayerNorm → LeakyReLU(0.01)  # 正交初始化
+  → Linear(256, 768) → LayerNorm → SiLU()  # 正交初始化
+  → Linear(768, 768) → LayerNorm → SiLU()  # 正交初始化
   → Linear(768, 5) → Tanh  # std=0.01 正交初始化（输出层）
   → action [batch, 5]
 ```
 
 **特点**：
-- 独立编码器：每个 Actor 有自己的 AttentionEncoder
+- 独立编码器：每个 Actor 有自己的 AttentionEncoder（MADDPG 为多 Actor 结构）
 - 输出层小 std 初始化：避免初始动作过于激进
 
-### CriticNetworkWithAttention（共享编码器架构）
+### MADDPG CriticNetworkWithAttention（共享编码器架构）
 ```
 joint_obs [batch, N×380]
   → 共享 AttentionEncoder（一次前向）→ [batch, N, 256]
   → AgentPoolingAttention（与 joint_action 聚合）→ [batch, 256]
-  → Linear(256, 768) → LayerNorm → LeakyReLU(0.01)
-  → Linear(768, 768) → LayerNorm → LeakyReLU(0.01) + Residual
-  → Linear(768, 768) → LayerNorm → LeakyReLU(0.01) + Residual
+  → Linear(256, 768) → LayerNorm → SiLU()
+  → Linear(768, 768) → LayerNorm → SiLU() + Residual
+  → Linear(768, 768) → LayerNorm → SiLU() + Residual
   → Linear(768, 1)
   → Q-value [batch, 1]
 ```
@@ -267,19 +276,21 @@ joint_obs [batch, N×380]
 
 ### AgentPoolingAttention 架构
 ```
-agent_encodings [batch, N, 256] + agent_actions [batch, N, 5]
+agent_encodings [batch, N, 256] + agent_actions [batch, N, 5] + active_mask [batch, N]
   → action_embed(actions) → [batch, N, 64]  # Linear(5, 64) + LayerNorm + LeakyReLU
-  → concat → [batch, N, 320]  # 256 + 64
-  → Self-Attention(num_heads=4, head_dim=80) → [batch, N, 320]
-  → FFN(320 → 640 → 320) → [batch, N, 320]
-  → Mean Pooling → [batch, 320]
+  → concat(encodings, action_embed) → [batch, N, 320]  # 256 + 64
+  → token_mask (通过 active_mask) 屏蔽失效 Agent 特征
+  → Self-Attention(num_heads=4, head_dim=80) (附带 key_padding_mask) → [batch, N, 320]
+  → 再次 token_mask + Residual → [batch, N, 320]
+  → FFN(320 → 640 → 320) + token_mask + Residual → [batch, N, 320]
+  → Masked Mean Pooling (仅平均 valid active 代理) → [batch, 320]
   → output_proj(320 → 256) → [batch, 256]
 ```
 
 **参数配置**：
 - encoder_dim: 256 (来自 AttentionEncoder 输出)
 - action_embed_dim: 64
-- num_heads: 4 (代码硬编码在 agents.py:146)
+- num_heads: 4（在 `CriticNetworkWithAttention` 构造时固定传入）
 - head_dim: 320 / 4 = 80 (符合最佳实践 64-128)
 - FFN expansion: 2x (320 → 640 → 320)
 
@@ -289,7 +300,105 @@ agent_encodings [batch, N, 256] + agent_actions [batch, N, 5]
 - Self-Attention：agents 之间信息交互
 - 残差连接：Self-Attention 和 FFN 都有残差，改善梯度流
 
-## 9. 关键实现细节
+### MAPPO AttentionActorNetwork
+```
+obs [batch, 380]
+  → AttentionEncoder → [batch, 256]
+  → _GaussianPolicyHead:
+      Linear(256, 768) → LayerNorm → SiLU()
+      Linear(768, 768) → LayerNorm → SiLU()
+      mean_head(768, action_dim)
+      global log_std parameter
+  → Normal(mean, std)
+  → tanh-squash（在 MAPPO 主逻辑中执行并做 Jacobian 校正）
+```
+
+**特点**：
+- 共享策略网络：MAPPO 使用单一共享 actor（不是每个 agent 一个 actor）。
+- actor/critic 编码器解耦：MAPPO attention 分支中 actor 与 critic 各自维护独立 AttentionEncoder。
+
+### MAPPO AttentionCriticNetwork
+```
+joint_obs [batch, N, 380]
+  → AttentionEncoder（批量编码）→ [batch, N, 256]
+  → AgentPoolingValue(active_mask) → [batch, 256]
+  → concat(one_hot(agent_id)) → [batch, 256 + N]
+  → _AgentConditionedValueHead:
+      Linear(256+N, 768) → LayerNorm → SiLU()
+      Linear(768, 768) → LayerNorm → SiLU() + Residual
+      Linear(768, 768) → LayerNorm → SiLU() + Residual
+      Linear(768, 1)
+  → V(joint_obs, agent_id)
+```
+
+**特点**：
+- value 聚合不引入动作：使用 `AgentPoolingValue`（action-free）进行 centralized value 上下文构建。
+- 支持 `joint_obs_index`：与 rollout flatten 后的 `(time, agent)` 样本对齐。
+
+## 9. AgentPoolingValue 模块说明
+
+### 设计与实现
+`AgentPoolingValue` 是 action-free 的 agent-level 聚合模块，用于 MAPPO 和其他 on-policy 算法中的 centralized value 估计。
+
+**与 `AgentPoolingAttention` 的区别**：
+- `AgentPoolingAttention`：接收共享编码+动作，用于 MADDPG 的 action-conditioned Q-value
+- `AgentPoolingValue`：仅接收共享编码，用于 MAPPO 的 action-free value 估计
+
+### 架构设计
+```
+agent_encodings [batch, N, encoder_dim] + active_mask [batch, N]
+  → Self-Attention(num_heads=8, multi-head=True)
+  → token_mask（通过 active_mask）屏蔽失效 agent
+  → Residual + LayerNorm
+  → FFN(encoder_dim → encoder_dim*2 → encoder_dim)
+  → token_mask 再次应用
+  → Residual + LayerNorm
+  → Masked Mean Pooling（仅平均有效 agent）→ [batch, encoder_dim]
+  → output_proj [batch, encoder_dim] → [batch, encoder_dim]
+```
+
+### 关键设计原则
+1. **Permutation-Invariant**：被 mask 的代理对输出无影响，对代理顺序不敏感
+2. **All-Inactive 处理**：全 inactive batch 行返回零向量（通过 `new_zeros` + `valid_rows` mask）
+3. **Token-Level Masking**：每个无效 agent 的特征被逐元素置零，而非整体跳过
+4. **Residual 连接**：Self-Attention 和 FFN 都有残差，改善深层网络的梯度流
+
+### 实现细节（来自代码）
+```python
+class AgentPoolingValue(nn.Module):
+    def __init__(self, encoder_dim: int = 256, num_heads: int = 8) -> None:
+        # Self-Attention 层
+        self.self_attn = nn.MultiheadAttention(
+            embed_dim=encoder_dim, num_heads=num_heads, batch_first=True
+        )
+        
+        # LayerNorm 和 FFN
+        self.attn_norm = nn.LayerNorm(encoder_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(encoder_dim, encoder_dim * 2),
+            nn.LeakyReLU(0.01),
+            nn.Linear(encoder_dim * 2, encoder_dim),
+        )
+        self.ffn_norm = nn.LayerNorm(encoder_dim)
+        
+        # 输出投影
+        self.output_proj = nn.Linear(encoder_dim, encoder_dim)
+    
+    def forward(self, agent_encodings: torch.Tensor, active_mask: torch.Tensor) -> torch.Tensor:
+        # agent_encodings: [batch, N, encoder_dim]
+        # active_mask: [batch, N] (dtype=torch.bool)
+        # 返回: [batch, encoder_dim]
+        # 全 inactive batch 行返回零向量
+```
+
+### Masked Mean Pooling
+```python
+# 仅平均有效 agent 的特征，返回固定维度输出
+denominator = active_mask.sum(dim=1).clamp_min(1.0)  # [batch]
+pooled = (masked_features * active_mask.unsqueeze(-1)).sum(dim=1) / denominator
+```
+
+## 10. 关键实现细节
 
 ### Bug 修复：File ID 反归一化 + round()
 ```python
@@ -354,7 +463,7 @@ for agent_idx in range(self.num_agents):
             target_param.copy_(config.UPDATE_FACTOR * param + (1.0 - config.UPDATE_FACTOR) * target_param)
 ```
 
-## 10. 使用方式
+## 11. 使用方式
 
 ### 配置开关
 ```python
@@ -397,6 +506,34 @@ else:
 - Critic 更新：梯度在共享编码器上累积 → 最后统一更新
 - Actor 更新：独立更新，不影响共享编码器
 
+### MAPPO 中的集成
+```python
+# mappo.py
+actor_cls = AttentionActorNetwork if config.USE_ATTENTION else ActorNetwork
+critic_cls = AttentionCriticNetwork if config.USE_ATTENTION else CriticNetwork
+
+self.actors = actor_cls(obs_dim, action_dim).to(device)
+self.critics = critic_cls(num_agents, obs_dim).to(device)
+
+# Critic 统一输入契约（attention / non-attention 一致）
+values = self.critics(
+  joint_obs_batch,
+  agent_index_batch,
+  joint_active_mask_batch,
+  sample_index=joint_obs_index_batch,
+)
+```
+
+**说明**：MAPPO 已去除 `global_state` 训练路径，统一使用 `joint_obs + agent_index + active_mask`。训练时通过 `joint_active_mask + joint_obs_index` 处理去重后的 joint context；在线动作采样时使用单 joint context（`[1, N, obs_dim]`）配合多 agent 查询。
+
+```python
+# get_action_and_value() 中的在线 value 评估（当前实现）
+agent_index = torch.arange(self.num_agents, device=self.device, dtype=torch.long)
+critic_joint_obs = obs_tensor.unsqueeze(0)          # [1, N, obs_dim]
+critic_active_mask = active_mask.unsqueeze(0).bool()  # [1, N]
+values = self.critics(critic_joint_obs, agent_index, critic_active_mask)
+```
+
 ## 11. 性能考虑
 
 ### 计算复杂度
@@ -406,8 +543,8 @@ else:
 - 总体增加约 25% 计算量，但信息完整性大幅提升
 
 ### 参数效率
-- 共享编码器：Critic 共享一个 AttentionEncoder，参数量 O(1) 而非 O(N)
-- Actor 编码器：每个 Actor 有独立编码器，可考虑进一步共享优化
+- 共享编码器：Critic 共享一个 AttentionEncoder，参数量 O(1) 而非 O(N)（MADDPG attention 分支）
+- Actor 编码器：MADDPG 中每个 Actor 有独立编码器；MAPPO 中为单共享 actor 编码器
 
 ### 训练效率优化
 ```python
@@ -446,19 +583,21 @@ encoded = self.encoder(reshaped)  # [batch * N, encoder_dim]
 
 ## 13. 与其他算法的兼容性
 
-**注意**：当前 Attention 机制仅在 MADDPG 中实现。
+**当前实现状态（以代码为准）**：
 
 | 算法 | Attention 支持 | 说明 |
 |------|----------------|------|
 | MADDPG | ✅ 完整支持 | Actor + Critic 均有 Attention 版本 |
-| MAPPO | ❌ 不支持 | 使用 MeanPoolingEncoder |
-| MATD3 | ❌ 不支持 | 使用 MeanPoolingEncoder |
-| MASAC | ❌ 不支持 | 使用 MeanPoolingEncoder |
+| MAPPO | ✅ 完整支持 | 支持 AttentionActorNetwork + AttentionCriticNetwork + AgentPoolingValue |
+| MATD3 | ❌ 不支持 | 使用独立 MLP Actor/双 Critic（无 Attention 编码器） |
+| MASAC | ❌ 不支持 | 使用独立 MLP Actor/双 Critic（无 Attention 编码器） |
+
+补充：`MeanPoolingEncoder` 当前用于 MADDPG 与 MAPPO 的无注意力分支，用来减少 padding 对输入语义的污染。
 
 ## 14. 未来改进方向
 
 1. **Actor 编码器共享**：使所有 Actor 共享一个编码器，减少参数量
-2. **其他算法支持**：为 MAPPO、MATD3、MASAC 实现 Attention 版本
+2. **其他算法支持**：为 MATD3、MASAC 实现 Attention 版本
 3. **位置编码**：为 UE 添加相对位置编码，增强空间感知
 4. **多层注意力**：堆叠多层 attention 捕捉更复杂的关系
 

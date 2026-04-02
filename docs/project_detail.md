@@ -64,7 +64,7 @@ $$
 | 飞行速度     | $v^{\text{UAV}}$        | 30 m/s | 3D 最大移动速度    |
 | 覆盖半径     | $R$                     | 250m   | 3D 球形覆盖范围    |
 | 感知范围     | $R^{\text{sense}}$      | 500m   | 邻居 UAV 发现距离  |
-| 最小间距     | $d_{\min}^{\text{UAV}}$ | 100m   | UAV 间最小安全距离 |
+| 参考间距     | $d_{\min}^{\text{UAV}}$ | 100m   | 覆盖重叠约束参考值（当前安全判定由 50m 危险距离与 5m 碰撞距离驱动） |
 
 #### UE 分层模型
 
@@ -80,6 +80,18 @@ $$
 - 位置：$(500, 500, 300)$ m（区域中心上空）
 - 作为所有内容的回源节点
 - 提供回程链路（Backhaul）连接
+
+#### 系统约束与安全参数
+
+| 参数类别 | 参数名 | 值 | 用途 |
+|--------|-------|-----|------|
+| **碰撞避免** | 危险距离下限（$d_{\text{danger}}$） | 50m | 开始线性惩罚的距离上界 |
+| | 碰撞距离（$d_{\text{collision}}$） | 5m | 引发失效的距离下界 |
+| | 危险靠近惩罚系数 | 4.0 | 最大惩罚 (当 $d_{\min}=5m$ 时) |
+| | 碰撞失效惩罚 | 10.0 | 固定惩罚 (每次碰撞) |
+| **边界约束** | 边界违规惩罚 | 2.0 | 越界动作的固定惩罚 |
+| **内容缓存** | 更新周期 ($T_{\text{cache}}$） | 10 步 | GDSF 缓存策略更新间隔 |
+| | 缓存文件数 | 20 | 可缓存内容数上限 |
 
 ---
 
@@ -130,21 +142,26 @@ $$
 \vec{p}_{\text{UAV}}(t+1) = \text{clip}(\vec{p}_{\text{UAV}}(t) + \vec{\Delta p}, \vec{p}_{\min}, \vec{p}_{\max})
 $$
 
-**碰撞避免机制：**
+**安全约束机制（当前实现）：**
 
-系统采用迭代式碰撞消解算法：
+系统不再使用“迭代推开式”碰撞消解，而是基于同时间同步轨迹计算最小间距并施加惩罚/失效：
 
-```
-for iteration in range(COLLISION_AVOIDANCE_ITERATIONS):
-    for each UAV pair (i, j):
-        if distance(i, j) < MIN_UAV_SEPARATION:
-            # 沿连线方向分离
-            direction = normalize(pos_i - pos_j)
-            overlap = MIN_UAV_SEPARATION - distance(i, j)
-            pos_i += direction * overlap * 0.5
-            pos_j -= direction * overlap * 0.5
-            mark_collision_violation(i, j)
-```
+1. 根据动作先得到每架 UAV 在单时隙内的 move-then-hover 轨迹；
+2. 对每一对活跃 UAV 计算同步最小距离
+
+$$
+d_{\min}^{(i,j)} = \min_{t \in [0,\tau]} \left\|\vec p_i(t)-\vec p_j(t)\right\|_2
+$$
+
+3. 若 $d_{\min}^{(i,j)} \le 5\text{m}$，两者标记为碰撞失效（本回合后续时隙不再活跃）；
+4. 若 $5\text{m} < d_{\min}^{(i,j)} < 50\text{m}$，施加连续危险靠近惩罚（线性插值）；
+5. 越界动作会触发边界违规标记，位置按边界裁剪。
+
+危险靠近惩罚项：
+
+$$
+r_{\text{unsafe}} = P_{\text{unsafe}} \cdot \text{clip}\!\left(\frac{50 - d_{\min}}{50 - 5}, 0, 1\right),\quad P_{\text{unsafe}}=4.0
+$$
 
 ---
 
@@ -178,7 +195,7 @@ for iteration in range(COLLISION_AVOIDANCE_ITERATIONS):
         │                                                   │
    ═════╪═════                                         ═════╪═════
    ║ Edge Link ║                                       ║ Edge Link ║
-   ║ B_edge=20MHz                                      ║ B_edge=20MHz
+    ║ B_edge=30MHz                                      ║ B_edge=30MHz
    ║ OFDMA多址 ║                                       ║ OFDMA多址 ║
    ═════╪═════                                         ═════╪═════
         │                                                   │
@@ -192,7 +209,7 @@ for iteration in range(COLLISION_AVOIDANCE_ITERATIONS):
 
 | 链路类型                | 频段带宽 | 多址方式 | 特点                            |
 | ----------------------- | -------- | -------- | ------------------------------- |
-| Edge Link (UE-UAV)      | 20 MHz   | OFDMA    | 同一 UAV 的多个 UE 共享带宽     |
+| Edge Link (UE-UAV)      | 30 MHz   | OFDMA    | 同一 UAV 的多个 UE 共享带宽     |
 | Inter-UAV Link          | 30 MHz   | FDM      | 被多个 UAV 选为协作者时分割带宽 |
 | Backhaul Link (UAV-MBS) | 40 MHz   | 点对点   | 全双工，区分上下行功率          |
 
@@ -445,7 +462,7 @@ $$
 ```
         UAV (发射功率 P_tx)
          │
-         │  总带宽 B_edge = 20 MHz
+         │  总带宽 B_edge = 30 MHz
          ▼
     ┌────┴────┬────┴────┬────┴────┐
     │ 子带 1  │ 子带 2  │   ...   │  OFDMA: N 个 UE 平分带宽
@@ -479,7 +496,7 @@ $$
 
 | 参数         | 符号                           | 值             | 说明          |
 | ------------ | ------------------------------ | -------------- | ------------- |
-| 边缘链路带宽 | $B_{\text{edge}}$            | 20 MHz         | UE-UAV 总带宽 |
+| 边缘链路带宽 | $B_{\text{edge}}$            | 30 MHz         | UE-UAV 总带宽 |
 | UAV 发射功率 | $P_{\text{tx}}^{\text{UAV}}$ | 0.8 W          | 总发射功率    |
 | 噪声功率     | $\sigma^2$                   | $10^{-13}$ W | AWGN 噪声     |
 | 干扰功率     | $I_{\text{total}}$           | 动态计算       | 来自其他 UAV  |
@@ -507,7 +524,7 @@ $$
 **典型数值示例**（假设 $G = 10^{-8}$, $N = 10$）：
 
 - SNR = $\frac{0.1 \times 10^{-8}}{10^{-13}}$ = 10,000 (40 dB)
-- 上行速率 ≈ $\frac{20}{10}$ × $\log_2(10001)$ ≈ 26.6 Mbps
+- 上行速率 ≈ $\frac{30}{10}$ × $\log_2(10001)$ ≈ 39.9 Mbps
 
 ##### 2.3.4.3 UAV-UAV 链路（Inter-UAV Link）
 
@@ -588,7 +605,7 @@ $$
 
 #### 2.3.5 同频干扰模型
 
-在 Edge Link 频段内，所有 UAV 共享相同的 20 MHz 带宽，存在**同频干扰**（Co-Channel Interference）。
+在 Edge Link 频段内，所有 UAV 共享相同的 30 MHz 带宽，存在**同频干扰**（Co-Channel Interference）。
 
 ##### 2.3.5.1 干扰场景图示
 
@@ -682,7 +699,7 @@ $$
 |                    | MBS 发射功率   | $P_{\text{tx}}^{\text{MBS}}$ | 20                       | W    |
 |                    | UE 发射功率    | $P_{\text{tx}}^{\text{UE}}$  | 0.1                      | W    |
 |                    | UAV 接收功率   | $P_{\text{rx}}$              | 0.1                      | W    |
-| **带宽**     | Edge Link 带宽 | $B_{\text{edge}}$            | 20                       | MHz  |
+| **带宽**     | Edge Link 带宽 | $B_{\text{edge}}$            | 30                       | MHz  |
 |                    | Inter-UAV 带宽 | $B_{\text{inter}}$           | 30                       | MHz  |
 |                    | Backhaul 带宽  | $B_{\text{backhaul}}$        | 40                       | MHz  |
 | **噪声**     | AWGN 功率      | $\sigma^2$                   | $10^{-13}$             | W    |
@@ -923,18 +940,48 @@ $$
 | 权重                     | 值  | 说明           |
 | ------------------------ | --- | -------------- |
 | $\alpha_1$             | 1.0 | 时延惩罚权重   |
-| $\alpha_2$             | 0.8 | 能耗惩罚权重   |
-| $\alpha_3$             | 1.2 | 公平性奖励权重 |
+| $\alpha_2$             | 1.0 | 能耗惩罚权重   |
+| $\alpha_3$             | 1.0 | 公平性奖励权重 |
 | $\alpha_{\text{rate}}$ | 1.0 | 吞吐量奖励权重 |
 
-#### 2.7.2 动态归一化机制
+#### 2.7.2 奖励缩放与对数压缩
 
-为平衡不同量级的指标，采用 **RunningNormalizer**：
+为平衡不同量级的指标，避免在训练初期产生巨大的梯度，采用**多层缩放机制**：
 
-1. **对数压缩**：$x' = \log(x + \epsilon)$
-2. **EMA 归一化**：$\hat{x} = \frac{x' - \mu}{\sigma}$
+**第一层：静态比例缩放**
 
-其中 $\mu, \sigma$ 使用指数移动平均在线更新。
+根据环境规模预设常量缩放因子，将各项指标归一化到合理范围：
+
+| 指标 | 缩放参数 | 计算公式 | 默认值 | 说明 |
+|------|---------|---------|--------|------|
+| 时延 | $B_{\text{lat}}$ | $\text{NUM\_UES} \times \tau \times 6$ | 600 | 使 scaled_latency ≈ 0.1~10 |
+| 能耗 | $B_{\text{nrg}}$ | $\text{NUM\_UAVS} \times P_{\text{hover}} \times \tau \times 3$ | 1200 | 使 scaled_energy ≈ 0.1~10 |
+| 吞吐量 | $B_{\text{rate}}$ | 固定值 | $5 \times 10^7$ | 使 scaled_rate ≈ 0.5~10 |
+
+$$\hat{x} = \frac{x}{B_x + \epsilon}$$
+
+**第二层：对数压缩**
+
+在缩放后应用对数函数，平滑指标边界，避免极端值导致梯度爆炸：
+
+$$r_{\text{lat}} = \alpha_1 \cdot \log(1 + \hat{\text{latency}})$$
+$$r_{\text{nrg}} = \alpha_2 \cdot \log(1 + \hat{\text{energy}})$$
+$$r_{\text{rate}} = \alpha_{\text{rate}} \cdot \log(1 + \hat{\text{rate}})$$
+
+**第三层：组合与全局缩放**
+
+所有分项奖励组合后，再乘以全局缩放因子以控制奖励量级：
+
+$$r_{\text{combined}} = r_{\text{fairness}} + r_{\text{rate}} - r_{\text{lat}} - r_{\text{nrg}}$$
+
+$$r_{\text{final}} = r_{\text{combined}} \times \text{REWARD\_SCALING\_FACTOR}$$
+
+其中 $\text{REWARD\_SCALING\_FACTOR} = 0.12$ 用于将最终奖励约束在 $[-1, 1]$ 范围内。
+
+**设计意义**：这种多层缩放方案保证了：
+- 不同量纲指标相互平衡（第一层）
+- 梯度平滑且数值稳定（第二层）
+- 奖励幅度适合策略学习（第三层）
 
 #### 2.7.3 公平性指标（Jain's Fairness Index）
 
@@ -944,24 +991,97 @@ $$
 
 其中 $c_m$ 是 UE $m$ 的滑动窗口服务覆盖率（最近 100 步内被成功服务的比例）。
 
-**JFI 映射到奖励：**
+**JFI 映射到奖励**
 
-$$
-r_{\text{fairness}} = \text{clip}((JFI - 0.6) \times 5, -2, 2)
-$$
+JFI 取值范围 $[0, 1]$，通过仿射变换和裁剪映射到奖励空间：
 
-#### 2.7.4 惩罚项
+$$r_{\text{fairness}} = \alpha_3 \cdot \text{clip}\left((JFI - b) \times s, r_{\min}, r_{\max}\right)$$
 
-| 违规类型 | 惩罚值 | 说明                                  |
-| -------- | ------ | ------------------------------------- |
-| 碰撞违规 | 1.0    | UAV 间距小于$d_{\min}^{\text{UAV}}$ |
-| 边界违规 | 1.0    | UAV 试图飞出边界                      |
+其中各参数的具体值和含义为：
 
-**最终奖励缩放：**
+| 参数 | 符号 | 值 | 说明 |
+|------|------|-----|------|
+| 基准点 | $b$ | 0.6 | JFI 值的"中点"；当 JFI=0.6 时，奖励为 0 |
+| 斜率 | $s$ | 5.0 | 放大系数；使公平性偏差 ±0.1 对应 ±0.5 奖励 |
+| 奖励下界 | $r_{\min}$ | -2.0 | 最低公平性惩罚上限 |
+| 奖励上界 | $r_{\max}$ | 2.0 | 最高公平性奖励上限 |
 
-$$
-r_{\text{final}} = r \times 0.12
-$$
+**映射曲线示例**
+
+| JFI 值 | $(JFI - 0.6) \times 5$ | 最终奖励 (clip) | 说明 |
+|-------|----------------------|-----------------|------|
+| 0.2 | -2.0 | -2.0 | 极度不公平，满惩罚 |
+| 0.5 | -0.5 | -0.5 | 公平性较差 |
+| 0.6 | 0.0 | 0.0 | 基准点，无奖惩 |
+| 0.7 | 0.5 | 0.5 | 公平性良好 |
+| 1.0 | 2.0 | 2.0 | 完全公平，满奖励 |
+
+这种设计确保了公平性指标与奖励的平衡性：既不会因为单次偏差过度惩罚，也能鼓励系统趋向更公平的服务分配。
+
+#### 2.7.4 碰撞安全约束与惩罚
+
+系统采用**分层惩罚机制**处理 UAV 间的碰撞风险，触发条件与惩罚值如下：
+
+| 违规类型 | 触发条件 | 惩罚计算 | 默认值 |
+|---------|---------|--------|--------|
+| 危险靠近 | $5\text{m} < d_{\min} < 50\text{m}$ | $P_{\text{unsafe}} \times \text{ratio}$（动态线性插值） | $P_{\text{unsafe}} = 4.0$ |
+| 碰撞失效 | $d_{\min} \leq 5\text{m}$ | 固定惩罚 + 标记失效 | $P_{\text{collision}} = 10.0$ |
+| 边界违规 | 越界动作 | 固定惩罚 | $P_{\text{boundary}} = 2.0$ |
+
+**危险靠近惩罚的详细计算**
+
+当两架 UAV 的同步最小距离 $d_{\min}$ 落在 $(5\text{m}, 50\text{m})$ 区间时，会受到**线性插值的动态惩罚**：
+
+$$\text{ratio} = \frac{50 - d_{\min}}{50 - 5} = \frac{50 - d_{\min}}{45}$$
+
+$$r_{\text{unsafe}} = -P_{\text{unsafe}} \times \text{clip}(\text{ratio}, 0, 1)$$
+
+- 当 $d_{\min} = 45\text{m}$ 时，ratio = 0.111，惩罚 ≈ -0.44
+- 当 $d_{\min} = 25\text{m}$ 时，ratio = 0.556，惩罚 ≈ -2.22
+- 当 $d_{\min} = 5\text{m}$ 时，ratio = 1.0，触发碰撞失效
+
+**碰撞失效的后续影响**
+
+一旦两架 UAV 发生碰撞（$d_{\min} \leq 5\text{m}$）：
+1. 两者立即标记为失效（`failed=True`）
+2. 本回合剩余时隙内，失效 UAV 的动作被忽略
+3. 每个失效 UAV 额外扣除 10.0 的固定惩罚
+4. 失效 UAV 的回程链路积压被清空
+
+**最终奖励计算**
+
+所有惩罚项在时隙末尾累加应用于 UAV 的回合奖励：
+
+$$r_{\text{final}} = (r_{\text{shared}} - \sum \text{penalties}) \times 0.12$$
+
+其中惩罚项包括：`proximity_penalty`（动态）、`collision_failure_penalty`（10.0）、`boundary_penalty`（2.0）。
+
+---
+
+#### 奖励设计参数速查表
+
+为方便调参，将所有与奖励相关的配置集中在一个表中：
+
+| 参数类别 | 参数名 | 值 | 类型 | 说明 |
+|--------|-------|-----|------|------|
+| **权重** | $\alpha_1$ (时延) | 1.0 | 无量纲 | 时延惩罚权重（固定） |
+| | $\alpha_2$ (能耗) | 1.0 | 无量纲 | 能耗惩罚权重（固定） |
+| | $\alpha_3$ (公平性) | 1.0 | 无量纲 | 公平性奖励权重（固定） |
+| | $\alpha_{\text{rate}}$ (吞吐量) | 1.0 | 无量纲 | 吞吐量奖励权重（固定） |
+| **缩放** | $B_{\text{lat}}$ (时延SCALE) | 600 | 秒 | 近似值 = `NUM_UES × τ × 6` |
+| | $B_{\text{nrg}}$ (能耗SCALE) | 1200 | 焦耳 | 近似值 = `NUM_UAVS × P_hover × τ × 3` |
+| | $B_{\text{rate}}$ (速率SCALE) | $5 \times 10^7$ | bps | 固定值 |
+| | REWARD_SCALING_FACTOR | 0.12 | 无量纲 | 全局奖励缩放因子 |
+| **JFI** | JFI 基准点 | 0.6 | 无量纲 | 公平性中点 |
+| | JFI 斜率 | 5.0 | 无量纲 | 公平性灵敏度 |
+| | JFI 奖励下界 | -2.0 | 无量纲 | 最低公平性惩罚 |
+| | JFI 奖励上界 | 2.0 | 无量纲 | 最高公平性奖励 |
+| **失效UE** | 未服务时延惩罚 | 60.0 | 秒 | 未被覆盖 UE 的时延值 |
+
+**调参建议**：
+- 权重（$\alpha_*$）通常保持为 1.0，通过 SCALE 参数实现目标间的平衡
+- SCALE 参数应根据环境规模（NUM_UAVS、NUM_UES）重新计算；公式见本表
+- REWARD_SCALING_FACTOR 影响收敛速度，通常在 0.05~0.20 之间调整
 
 ---
 
@@ -972,66 +1092,84 @@ $$
 每个 UAV 智能体的观测向量维度由配置项决定：
 
 $$
-\text{OBS\_DIM\_SINGLE} = 3 + K + (N_{\text{nbr}} \times 5) + (N_{\text{UE}} \times 5)
+\text{OBS\_DIM\_SINGLE} = \text{OWN\_STATE\_DIM} + (N_{\text{nbr}} \times \text{NEIGHBOR\_STATE\_DIM}) + (N_{\text{UE}} \times \text{UE\_STATE\_DIM}) + 2
 $$
 
 其中：
 
-- $K = \text{NUM\_FILES}$（缓存文件数，当前配置为 20）
-- $N_{\text{nbr}} = \text{MAX\_UAV\_NEIGHBORS}$（邻居 UAV 上限，当前配置为 3）
-- $N_{\text{UE}} = \text{MAX\_ASSOCIATED\_UES}$（关联 UE 上限，当前配置为 20）
+- $\text{OWN\_STATE\_DIM} = 24$（位置(3) + 缓存(20) + 活跃标记(1)）
+- $N_{\text{nbr}} = \text{MAX\_UAV\_NEIGHBORS}$（邻居 UAV 上限，当前配置为 4）
+- $\text{NEIGHBOR\_STATE\_DIM} = 26$（相对位置(3) + 缓存位图(20) + 即时帮助能力(1) + 缓存互补性(1) + 活跃标记(1)）
+- $N_{\text{UE}} = \text{MAX\_ASSOCIATED\_UES}$（关联 UE 上限，当前配置为 50）
+- $\text{UE\_STATE\_DIM} = 5$（相对位置(3) + 归一化文件ID(1) + 缓存命中标志(1)）
+- 额外 2 维：邻居数量原始计数(1) + 关联UE数量原始计数(1)
 
 因此在默认配置（NUM_UAVS=10, NUM_UES=100）下：
 
 $$
-\text{OBS\_DIM\_SINGLE} = 3 + 20 + 3\times 5 + 20\times 5 = 138
+\text{OBS\_DIM\_SINGLE} = 24 + 4 \times 26 + 50 \times 5 + 2 = 380
 $$
 
 #### 3.1.1 观测结构
 
 ```
-观测向量 (默认 138 维)
-├── 自身状态 (23 维)
+观测向量 (默认 380 维)
+├── 自身状态 (24 维)
 │   ├── 归一化位置 [x/X_max, y/Y_max, z/Z_max]  ... 3 维
-│   └── 缓存位图 [cache_0, cache_1, ..., cache_19] ... 20 维
+│   ├── 缓存位图 [cache_0, cache_1, ..., cache_19] ... 20 维
+│   └── 活跃标记 (0/1) ... 1 维
 │
-├── 邻居状态 (3 × 5 = 15 维)
-│   └── 每个邻居 (5 维):
+├── 邻居状态 (4 × 26 = 104 维)
+│   └── 每个邻居 (26 维):
 │       ├── 相对位置 [Δx, Δy, Δz] / R_sense  ... 3 维
-│       ├── 即时帮助能力 (0/1)  ... 1 维
-│       └── 缓存互补性 (0~1)  ... 1 维
+│       ├── 缓存位图 [cache_0, cache_1, ..., cache_19] ... 20 维
+│       ├── 即时帮助能力 (0~1)  ... 1 维
+│       ├── 缓存互补性 (0~1)  ... 1 维
+│       └── 活跃标记 (0/1)  ... 1 维
 │
-└── 关联 UE 状态 (20 × 5 = 100 维)
-    └── 每个 UE (5 维):
-        ├── 相对位置 [Δx, Δy, Δz] / R_coverage  ... 3 维
-        ├── 归一化请求文件ID  ... 1 维
-        └── 本地缓存命中标志 (0/1)  ... 1 维
+├── 关联 UE 状态 (50 × 5 = 250 维)
+│   └── 每个 UE (5 维):
+│       ├── 相对位置 [Δx, Δy, Δz] / R_coverage  ... 3 维
+│       ├── 归一化请求文件ID  ... 1 维
+│       └── 本地缓存命中标志 (0/1)  ... 1 维
+│
+└── 实体计数记录 (2 维)
+    ├── 邻居数量 (原始计数值，范围 [0, MAX_UAV_NEIGHBORS]，默认0~4) ... 1 维
+    └── 关联UE数量 (原始计数值，范围 [0, MAX_ASSOCIATED_UES]，默认0~50) ... 1 维
 ```
+
+**说明**：计数字段采用原始整数值（未归一化）。在注意力机制中，这两个字段用于**动态生成 Mask**：将计数值转换为 boolean mask，使注意力机制只关注真实数据而忽略填充。在非注意力模式中，MeanPoolingEncoder在内部会按这些计数做均值池化，有效减轻padding对输入特征的污染。
 
 #### 3.1.2 观测特征详解
 
 **（1）自身状态**
 
-| 特征       | 维度 | 范围   | 说明                                                                           |
+| 特征       | 维度 | 值域   | 说明                                                                           |
 | ---------- | ---- | ------ | ------------------------------------------------------------------------------ |
-| 归一化位置 | 3    | [0, 1] | $(x/1000, y/1000, z/600)$（代码中使用 $Z_{\max}=\text{UE\_MAX\_ALT}=600$） |
+| 归一化位置 | 3    | [0, 1] | $(x/1000, y/1000, z/600)$，Z轴上限为 $\text{UE\_MAX\_ALT}=600\text{m}$（包含空中UE的最大高度） |
 | 缓存位图   | 20   | {0, 1} | 第$k$ 位为 1 表示缓存了文件 $k$                                            |
+| 活跃标记   | 1    | {0, 1} | 当前无人机是否存活/活跃（1=活跃，0=失效）                                   |
 
-**（2）邻居状态**（最多 3 个最近邻居）
+**（2）邻居状态**（最多 4 个最近邻居）
 
 | 特征         | 维度 | 范围    | 计算方式                                                                           |
 | ------------ | ---- | ------- | ---------------------------------------------------------------------------------- |
 | 相对位置     | 3    | [-1, 1] | $(\vec{p}_{\text{neighbor}} - \vec{p}_{\text{self}}) / R^{\text{sense}}$         |
-| 即时帮助能力 | 1    | {0, 1}  | 邻居是否缓存了当前任一所需文件                                                     |
-| 缓存互补性   | 1    | [0, 1]  | $1 - \text{Jaccard}(\text{cache}_{\text{self}}, \text{cache}_{\text{neighbor}})$ |
+| 缓存位图     | 20   | {0, 1}  | 邻居的缓存状态位图                                                                 |
+| 即时帮助能力 | 1    | [0, 1]  | 该邻居能帮助解决本地无法命中请求的比例                                             |
+| 缓存互补性   | 1    | [0, 1]  | 自己缺少的全体文件中，该邻居能提供的比例                                           |
+| 活跃标记     | 1    | {0, 1}  | 当前邻居是否存活/活跃                                                              |
 
-**（3）关联 UE 状态**（最多 $N_{\text{UE}}=\text{MAX\_ASSOCIATED\_UES}$ 个最近 UE；默认配置为 20）
+**（3）关联 UE 状态**（最多 $N_{\text{UE}}=\text{MAX\_ASSOCIATED\_UES}$ 个最近 UE；默认配置为 50）
 
 | 特征          | 维度 | 范围   | 说明                                                 |
 | ------------- | ---- | ------ | ---------------------------------------------------- |
 | 相对位置      | 3    | ~      | $(\vec{p}_{\text{UE}} - \vec{p}_{\text{UAV}}) / R$ |
 | 归一化文件 ID | 1    | [0, 1] | $\text{req\_id} / K$                               |
 | 缓存命中标志  | 1    | {0, 1} | 本 UAV 是否缓存该请求文件                            |
+
+**（4）实体计数（2 维）**
+分别提供有效关联到的观测邻居及关联UE数量（原始计数，未在环境侧归一化）。注意力分支直接据此构建 mask；无注意力的 MADDPG 均值池化编码器内部会再按最大值归一化这两个计数特征。
 
 ### 3.2 动作空间
 
@@ -1093,31 +1231,48 @@ $$
 
 ### 3.3 支持的 MARL 算法
 
-| 算法             | 类型       | Actor  | Critic    | 特点                 |
+本项目采用 CTDE（集中式训练，分布式执行）架构，支持多种前沿的多智能体强化学习算法，下面重点介绍其核心算法的实现特点：
+
+#### 3.3.1 MADDPG (多智能体深度确定性策略梯度)
+作为本项目的核心 Off-policy 算法基线，其经历了深度定制：
+1. **注意力协同架构（Attention Mechanism）**：通过可配置的 `USE_ATTENTION`，MADDPG 和 MAPPO 现已支持基于 Cross-Attention 的状态编码器，以处理可变长度的 UE 列表和邻居状态。
+2. **共享编码器与置换不变性**：在 Attention 模式下，多个 Agent 的 Critic 网络共享底层的注意力特征提取器以提升样本效率。其 `AgentPoolingAttention` 模块实现了真正的置换不变（Permutation-Invariant）聚合，使 Critic 能稳定且可扩展地评估全局状态。
+3. **掩码控制（Active / Bootstrap Masking）**：深度集成了防失效智能体干扰机制，屏蔽发生崩溃出界截断的 Agent，并在目标 Critic 评估时使用精准的 next-step Bootstrap 掩码。
+
+#### 3.3.2 MAPPO (多智能体近端策略优化)
+作为本项目的核心 On-policy 算法基线，针对复杂的 UAV 微调场景解决了多个关键痛点：
+1. **有界动作空间与 Jacobian 校正**：摒弃了易出现越界截断的传统 Normal 采样裁剪方案，环境直接映射 $[-1, 1]$ 有界动作，而在算法层采用 `tanh-squash` 机制并附加 Jacobian 行列式校正。保证了动作采样不越界且 Log Probability 计算的绝对准确。
+2. **Rollout 级别的 Advantage 归一化**：不同于在每个 mini-batch 内重复归一化（易引入高方差），系统利用 Rollout Buffer 的全量视角进行全局 Advantage 归一化，且仅针对 Active 的智能体生效，极大提升了训练稳定性。
+3. **Per-Agent 价值解耦结构**：由于 UAV 环境存在特异性的惩罚（如个体碰撞/边界/邻近惩罚），如果Critic直接采用粗糙的同一全局价值广播会产生目标冲突。实际 Critic 的网络设计保留了单标量输出结构头，但其数据流和 Return 计算完全按照 Per-Agent 样本结构分别展开，实现全局状态评价与个体收益的完美结合。
+4. **双分支实现（Attention / Non-Attention）**：当 `USE_ATTENTION=True` 时，MAPPO 使用 `AttentionActorNetwork + AttentionCriticNetwork + AgentPoolingValue`；当 `USE_ATTENTION=False` 时，使用 `MeanPoolingEncoder` 前端的轻量 MLP 分支。两条分支共享统一 critic 输入契约：`joint_obs + agent_index + active_mask`。
+5. **批量对齐与工程鲁棒性**：训练 mini-batch 采用 `joint_obs + joint_active_mask + joint_obs_index` 去重对齐 `(time, agent)` 扁平样本，Critic 通过 `sample_index` 做上下文映射；模型加载阶段使用 checkpoint metadata 校验与原子回滚，避免 attention/non-attention 配置错配导致的部分加载污染。
+
+#### 3.3.3 其他算法模型与通用网络配置
+| 算法             | 类型       | Actor  | Critic    | 核心特点                 |
 | ---------------- | ---------- | ------ | --------- | -------------------- |
-| **MADDPG** | Off-policy | 分布式 | 集中式    | 经典 CTDE 框架       |
-| **MATD3**  | Off-policy | 分布式 | 双 Critic | 减少 Q 值过估计      |
-| **MAPPO**  | On-policy  | 分布式 | 集中式    | 样本效率高，稳定性好 |
-| **MASAC**  | Off-policy | 分布式 | 双 Critic | 最大熵探索           |
-| **Random** | -          | 随机   | -         | 基线对比             |
+| **MATD3**  | Off-policy | 分布式 | 双 Critic | 引入双网络与策略延迟更新减少 Q 值过估计 |
+| **MASAC**  | Off-policy | 分布式 | 双 Critic | 基于最大熵探索优化，提升鲁棒性 |
+| **Random** | -          | 随机   | -         | 用于通信与系统仿真的基线性能对比 |
 
-#### 网络架构
+##### 网络与超参数基线配置
+- **MLP 隐藏层维度**：768 (Shared block configuration)
+- **Actor 网络结构**：
+    - MADDPG/MATD3: `obs_dim → 768 → 768 → action_dim` (确定性策略，直接 tanh 输出)
+    - MASAC: `obs_dim → 768 → 768 → (mean, log_std)`（随机策略，重参数采样后 tanh）
+  - MAPPO: `obs_dim → 768 → 768 → action_dim (均值) + log_std` (正态分布与 tanh-squash 机制)
+    - *注*：MADDPG 与 MAPPO 在无注意力配置下均使用 `MeanPoolingEncoder` 缓解 padding 对输入语义的污染。
+- **Critic 网络结构**：
+    - MATD3/MASAC: `(num_agents*obs_dim + num_agents*action_dim) → 768 → 768 → 1`（双 Critic 版本，无残差）
+    - MAPPO: `joint_obs → (MeanPoolingEncoder 或 AttentionEncoder+AgentPoolingValue) → agent-conditioned value head(one_hot(agent_id)) → 1`
+    - MADDPG: `joint_obs + joint_action → (MeanPoolingEncoder 或共享 AttentionEncoder + AgentPoolingAttention) → 768 残差 MLP → 1`
+- **优化器与学习率**：Actor $LR = 1 \times 10^{-4}$，Critic $LR = 2 \times 10^{-4}$，AdamW
 
-- **MLP 隐藏层维度**：768
-- **Actor 网络**：`obs_dim → 768 → 768 → action_dim`
-- **MAPPO Critic 网络**：`(state_dim + num_agents) → 768 → 768 → 1`
-
-#### 关键超参数
-
-| 参数               | 值                   | 说明     |
-| ------------------ | -------------------- | -------- |
-| Actor 学习率       | $2 \times 10^{-4}$ |          |
-| Critic 学习率      | $4 \times 10^{-4}$ |          |
-| 折扣因子$\gamma$ | 0.99                 |          |
-| 软更新系数$\tau$ | 0.002                |          |
-| 经验回放容量       | 500,000              |          |
-| Batch 大小         | 1024                 |          |
-| 初始随机步数       | 50,000               | 探索阶段 |
+| 通用超参数         | 值 | 说明 |
+|------------------|----|------|
+| 分配折现 $\gamma$ | 0.99 | 价值未来折扣率 |
+| 软更新网络 $\tau$ | 0.001 | 目标网络的平滑更新率 |
+| 经验回放与批量 | Buffer: $6\times10^5$, Batch: 1024 | |
+| MAPPO Epoch | 10 | PPO阶段迭代轮数 |
 
 ---
 
@@ -1195,9 +1350,9 @@ python main.py test --num_episodes 100 --model_path <path> --config_path <path>
 ### 可视化
 
 ```bash
-python visualize.py --log_path <log_data.json>
+python visualize.py
 ```
 
 ---
 
-*文档生成时间：2026年1月14日*
+*文档更新：2026年4月2日（已按当前代码实现校准）*

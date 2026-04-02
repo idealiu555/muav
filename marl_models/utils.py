@@ -59,7 +59,6 @@ def get_model(model_name: str) -> MARLModel:
             num_agents=config.NUM_UAVS,
             obs_dim=config.OBS_DIM_SINGLE,
             action_dim=config.ACTION_DIM,
-            state_dim=config.STATE_DIM,
             device=device,
         )
     elif model_name == "masac":

@@ -427,12 +427,6 @@ class AgentPoolingAttention(nn.Module):
         self.output_proj = layer_init(nn.Linear(agent_feature_dim, encoder_dim))
         self.output_dim = encoder_dim
     
-    @staticmethod
-    def _masked_mean(tokens: torch.Tensor, active_mask: torch.Tensor) -> torch.Tensor:
-        weights = active_mask.unsqueeze(-1).to(dtype=tokens.dtype)
-        denom = weights.sum(dim=1).clamp_min(1.0)
-        return (tokens * weights).sum(dim=1) / denom
-
     def forward(
         self,
         agent_encodings: torch.Tensor,
@@ -454,37 +448,103 @@ class AgentPoolingAttention(nn.Module):
                 f"Expected agent_actions leading shape {(batch_size, num_agents)}, "
                 f"got {tuple(agent_actions.shape[:2])}"
             )
-        if active_mask.shape != (batch_size, num_agents):
-            raise ValueError(f"Expected active_mask shape {(batch_size, num_agents)}, got {tuple(active_mask.shape)}")
-        if active_mask.dtype != torch.bool:
-            raise TypeError(f"active_mask must use dtype torch.bool, got {active_mask.dtype}")
-
-        active_mask = active_mask.to(device=agent_encodings.device)
-        pooled_outputs = agent_encodings.new_zeros((batch_size, self.output_dim))
-        valid_rows = active_mask.any(dim=1)
-        if not valid_rows.any():
-            return pooled_outputs
-
-        enc_valid = agent_encodings[valid_rows]
-        act_valid = agent_actions[valid_rows]
-        mask_valid = active_mask[valid_rows]
-        token_mask = mask_valid.unsqueeze(-1).to(dtype=enc_valid.dtype)
-        key_padding_mask = ~mask_valid
-
-        action_emb = self.action_embed(act_valid)
-        agent_features = torch.cat([enc_valid, action_emb], dim=-1) * token_mask
-
-        attn_out, _ = self.self_attn(
-            agent_features,
-            agent_features,
-            agent_features,
-            key_padding_mask=key_padding_mask,
-            need_weights=False,
+        action_emb = self.action_embed(agent_actions)
+        agent_features = torch.cat([agent_encodings, action_emb], dim=-1)
+        return _pool_active_agent_tokens(
+            agent_features=agent_features,
+            active_mask=active_mask,
+            self_attn=self.self_attn,
+            attn_norm=self.attn_norm,
+            ffn=self.ffn,
+            ffn_norm=self.ffn_norm,
+            output_proj=self.output_proj,
         )
-        agent_features = self.attn_norm(agent_features + attn_out) * token_mask
 
-        ffn_out = self.ffn(agent_features)
-        agent_features = self.ffn_norm(agent_features + ffn_out) * token_mask
 
-        pooled_outputs[valid_rows] = self.output_proj(self._masked_mean(agent_features, mask_valid))
+class AgentPoolingValue(nn.Module):
+    """
+    Agent 级别的 permutation-invariant value 聚合模块。
+
+    该模块只聚合 agent 编码，不接收动作输入，适用于 centralized value 估计。
+    """
+
+    def __init__(self, encoder_dim: int = 256, num_heads: int = 8) -> None:
+        super().__init__()
+        if encoder_dim % num_heads != 0:
+            raise ValueError("encoder_dim must be divisible by num_heads")
+
+        self.encoder_dim = encoder_dim
+        self.self_attn = nn.MultiheadAttention(embed_dim=encoder_dim, num_heads=num_heads, batch_first=True)
+        self.attn_norm = nn.LayerNorm(encoder_dim)
+        self.ffn = nn.Sequential(
+            layer_init(nn.Linear(encoder_dim, encoder_dim * 2)),
+            nn.LeakyReLU(0.01),
+            layer_init(nn.Linear(encoder_dim * 2, encoder_dim)),
+        )
+        self.ffn_norm = nn.LayerNorm(encoder_dim)
+        self.output_proj = layer_init(nn.Linear(encoder_dim, encoder_dim))
+        self.output_dim = encoder_dim
+
+    def forward(self, agent_encodings: torch.Tensor, active_mask: torch.Tensor) -> torch.Tensor:
+        batch_size, num_agents, encoding_dim = agent_encodings.shape
+        if encoding_dim != self.encoder_dim:
+            raise ValueError(
+                f"Expected agent_encodings last dim {self.encoder_dim}, got {encoding_dim}"
+            )
+        return _pool_active_agent_tokens(
+            agent_features=agent_encodings,
+            active_mask=active_mask,
+            self_attn=self.self_attn,
+            attn_norm=self.attn_norm,
+            ffn=self.ffn,
+            ffn_norm=self.ffn_norm,
+            output_proj=self.output_proj,
+        )
+
+
+def _pool_active_agent_tokens(
+    *,
+    agent_features: torch.Tensor,
+    active_mask: torch.Tensor,
+    self_attn: nn.MultiheadAttention,
+    attn_norm: nn.LayerNorm,
+    ffn: nn.Sequential,
+    ffn_norm: nn.LayerNorm,
+    output_proj: nn.Linear,
+) -> torch.Tensor:
+    batch_size, num_agents, _ = agent_features.shape
+    if active_mask.shape != (batch_size, num_agents):
+        raise ValueError(f"Expected active_mask shape {(batch_size, num_agents)}, got {tuple(active_mask.shape)}")
+    if active_mask.dtype != torch.bool:
+        raise TypeError(f"active_mask must use dtype torch.bool, got {active_mask.dtype}")
+
+    active_mask = active_mask.to(device=agent_features.device)
+    pooled_outputs = agent_features.new_zeros((batch_size, output_proj.out_features))
+    valid_rows = active_mask.any(dim=1)
+    if not valid_rows.any():
         return pooled_outputs
+
+    features_valid = agent_features[valid_rows]
+    mask_valid = active_mask[valid_rows]
+    token_mask = mask_valid.unsqueeze(-1).to(dtype=features_valid.dtype)
+    key_padding_mask = ~mask_valid
+
+    features_valid = features_valid * token_mask
+
+    attn_out, _ = self_attn(
+        features_valid,
+        features_valid,
+        features_valid,
+        key_padding_mask=key_padding_mask,
+        need_weights=False,
+    )
+    features_valid = attn_norm(features_valid + attn_out) * token_mask
+
+    ffn_out = ffn(features_valid)
+    features_valid = ffn_norm(features_valid + ffn_out) * token_mask
+
+    pooled_outputs[valid_rows] = output_proj(
+        (features_valid * mask_valid.unsqueeze(-1).to(dtype=features_valid.dtype)).sum(dim=1)
+        / mask_valid.sum(dim=1, keepdim=True).clamp_min(1.0).to(dtype=features_valid.dtype)
+    )
+    return pooled_outputs

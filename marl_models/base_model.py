@@ -21,9 +21,7 @@ class MARLModel(ABC):
         self.action_dim = action_dim
         self.device = device
 
-    def get_action_and_value(
-        self, obs: np.ndarray, global_state: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def get_action_and_value(self, obs: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Gets environment actions, raw policy actions, log probabilities, and per-agent value predictions.
         Essential for on-policy algorithms like PPO/MAPPO.

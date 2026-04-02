@@ -128,7 +128,7 @@ REWARD_SCALING_FACTOR: float = 0.12  # scaling factor for rewards (归一化后�
 
 # Balanced scales to make log1p(scaled) ≈ 1.5-2.0 for each component
 LATENCY_REWARD_SCALE: float = NUM_UES * TIME_SLOT_DURATION * 6  # ~600, scaled_latency ≈ 7
-ENERGY_REWARD_SCALE: float = NUM_UAVS * POWER_HOVER * TIME_SLOT_DURATION * 3  # ~150, scaled_energy ≈ 3.5
+ENERGY_REWARD_SCALE: float = NUM_UAVS * POWER_HOVER * TIME_SLOT_DURATION * 3  # ~1200, scaled_energy ≈ 3.5
 RATE_REWARD_SCALE: float = 5e7  # scaled_rate ≈ 5-6
 
 # JFI reward parameters (balanced around midpoint)
@@ -161,11 +161,7 @@ OBS_DIM_SINGLE: int = _OBS_BASE_DIM + 2
 # - beam actions are normalized control signals that the environment maps to angles
 # This is intentionally different from the official onpolicy Box-action path, which
 # evaluates/executes the same unsquashed action tensor without a local tanh-squash contract.
-# Centralized state contract:
-# - STATE_DIM is the public rollout/training state size exposed outside the model
-# - any agent-aware critic input expansion is owned inside MAPPO
 ACTION_DIM: int = 5 if BEAM_CONTROL_ENABLED else 3  # [dx, dy, dz] 或 [dx, dy, dz, beam_theta, beam_phi]
-STATE_DIM: int = NUM_UAVS * OBS_DIM_SINGLE
 MLP_HIDDEN_DIM: int = 768  # shared hidden width for actor/critic MLP blocks
 
 ACTOR_LR: float = 1e-4
