@@ -70,7 +70,15 @@ class CriticNetwork(nn.Module):
         encoded = self.encoder(obs_reshaped)
         return encoded.view(batch_size, self.num_agents * self.encoder.output_dim)
 
-    def forward(self, joint_obs: torch.Tensor, joint_action: torch.Tensor, joint_encoded: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(
+        self,
+        joint_obs: torch.Tensor,
+        joint_action: torch.Tensor,
+        joint_encoded: torch.Tensor | None = None,
+        active_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # `active_mask` is accepted only to keep the attention and non-attention
+        # critic call signatures aligned; the plain MLP critic does not apply it.
         if joint_encoded is None:
             joint_encoded = self.encode_observations(joint_obs)
 
@@ -179,13 +187,15 @@ class CriticNetworkWithAttention(nn.Module):
 
     def forward(self, joint_obs: torch.Tensor, joint_action: torch.Tensor, 
                 joint_encoded: torch.Tensor | None = None,
-                num_agents: int | None = None) -> torch.Tensor:
+                num_agents: int | None = None,
+                active_mask: torch.Tensor | None = None) -> torch.Tensor:
         """
         Args:
             joint_obs: [batch, N * obs_dim] 所有 agent 的观测（仅当 joint_encoded=None 时使用）
             joint_action: [batch, N * action_dim] 所有 agent 的动作
             joint_encoded: [batch, N, encoder_dim] 预计算的编码（可选）
             num_agents: agent 数量（可选，用于扩展场景）
+            active_mask: [batch, N] 活跃 agent mask，True=active（可选）
         
         Returns:
             q_value: [batch, 1] Q 值
@@ -200,9 +210,17 @@ class CriticNetworkWithAttention(nn.Module):
         # 重塑动作为 [batch, N, action_dim]
         batch_size = joint_encoded.shape[0]
         actions_reshaped = joint_action.view(batch_size, num_agents, self.action_dim)
+        if active_mask is None:
+            active_mask = torch.ones((batch_size, num_agents), dtype=torch.bool, device=joint_encoded.device)
+        else:
+            if active_mask.shape != (batch_size, num_agents):
+                raise ValueError(
+                    f"Expected active_mask shape {(batch_size, num_agents)}, got {tuple(active_mask.shape)}"
+                )
+            active_mask = active_mask.to(device=joint_encoded.device, dtype=torch.bool)
         
         # Permutation-Invariant 聚合
-        pooled = self.agent_pooling(joint_encoded, actions_reshaped)  # [batch, pooled_dim]
+        pooled = self.agent_pooling(joint_encoded, actions_reshaped, active_mask)  # [batch, pooled_dim]
 
         # MLP 处理（带残差连接）
         x = self.activation(self.ln1(self.fc1(pooled)))

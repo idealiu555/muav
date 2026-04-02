@@ -85,6 +85,8 @@ class MADDPG(MARLModel):
         next_obs_tensor: torch.Tensor = torch.as_tensor(next_obs_batch, dtype=torch.float32, device=self.device)
         active_mask_tensor: torch.Tensor = torch.as_tensor(active_mask_batch, dtype=torch.float32, device=self.device)
         bootstrap_mask_tensor: torch.Tensor = torch.as_tensor(bootstrap_mask_batch, dtype=torch.float32, device=self.device)
+        active_mask_bool: torch.Tensor = active_mask_tensor > 0.5
+        bootstrap_mask_bool: torch.Tensor = bootstrap_mask_tensor > 0.5
 
         batch_size: int = obs_tensor.shape[0]  # Get batch size from the data
         obs_flat: torch.Tensor = obs_tensor.reshape(batch_size, -1)
@@ -135,12 +137,22 @@ class MADDPG(MARLModel):
             
             # Update Critic
             with torch.no_grad():
-                target_q_value: torch.Tensor = self.target_critics[agent_idx](next_obs_flat, next_actions_tensor, target_joint_encoded)
+                target_q_value: torch.Tensor = self.target_critics[agent_idx](
+                    next_obs_flat,
+                    next_actions_tensor,
+                    target_joint_encoded,
+                    active_mask=bootstrap_mask_bool,
+                )
                 agent_reward: torch.Tensor = rewards_tensor[:, agent_idx].unsqueeze(1)
                 agent_bootstrap: torch.Tensor = bootstrap_mask_tensor[:, agent_idx].unsqueeze(1)
                 y: torch.Tensor = agent_reward + config.DISCOUNT_FACTOR * target_q_value * agent_bootstrap
 
-            current_q_value: torch.Tensor = self.critics[agent_idx](obs_flat, actions_flat, joint_encoded)
+            current_q_value: torch.Tensor = self.critics[agent_idx](
+                obs_flat,
+                actions_flat,
+                joint_encoded,
+                active_mask=active_mask_bool,
+            )
 
             critic_loss: torch.Tensor = masked_mean((current_q_value - y).pow(2), valid_mask)
             self.critic_optimizers[agent_idx].zero_grad(set_to_none=True)
@@ -181,7 +193,12 @@ class MADDPG(MARLModel):
             actor_joint_encoded = joint_encoded.detach()
             for param in self.critics[agent_idx].parameters():
                 param.requires_grad_(False)
-            actor_q: torch.Tensor = self.critics[agent_idx](obs_flat, pred_actions_flat, actor_joint_encoded)
+            actor_q: torch.Tensor = self.critics[agent_idx](
+                obs_flat,
+                pred_actions_flat,
+                actor_joint_encoded,
+                active_mask=active_mask_bool,
+            )
             actor_loss: torch.Tensor = -masked_mean(actor_q, valid_mask)
             self.actor_optimizers[agent_idx].zero_grad(set_to_none=True)
             # No need to retain graph: each actor's computation graph is independent

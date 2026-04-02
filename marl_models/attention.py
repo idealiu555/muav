@@ -427,33 +427,64 @@ class AgentPoolingAttention(nn.Module):
         self.output_proj = layer_init(nn.Linear(agent_feature_dim, encoder_dim))
         self.output_dim = encoder_dim
     
-    def forward(self, agent_encodings: torch.Tensor, agent_actions: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def _masked_mean(tokens: torch.Tensor, active_mask: torch.Tensor) -> torch.Tensor:
+        weights = active_mask.unsqueeze(-1).to(dtype=tokens.dtype)
+        denom = weights.sum(dim=1).clamp_min(1.0)
+        return (tokens * weights).sum(dim=1) / denom
+
+    def forward(
+        self,
+        agent_encodings: torch.Tensor,
+        agent_actions: torch.Tensor,
+        active_mask: torch.Tensor,
+    ) -> torch.Tensor:
         """
         Args:
             agent_encodings: [batch, N, encoder_dim] 所有 agent 的观测编码
             agent_actions: [batch, N, action_dim] 所有 agent 的动作
+            active_mask: [batch, N] 1=True=active, 0=False=inactive
         
         Returns:
             pooled: [batch, output_dim] 聚合后的全局特征（与 N 无关）
         """
         batch_size, num_agents, _ = agent_encodings.shape
-        
-        # 1. 动作嵌入
-        action_emb = self.action_embed(agent_actions)  # [batch, N, action_embed_dim]
-        
-        # 2. 拼接观测编码和动作嵌入
-        agent_features = torch.cat([agent_encodings, action_emb], dim=-1)  # [batch, N, agent_feature_dim]
-        
-        # 3. Self-Attention（agents 交互）
-        attn_out, _ = self.self_attn(agent_features, agent_features, agent_features)
-        agent_features = self.attn_norm(agent_features + attn_out)  # 残差连接
-        
-        # 4. FFN
+        if agent_actions.shape[:2] != (batch_size, num_agents):
+            raise ValueError(
+                f"Expected agent_actions leading shape {(batch_size, num_agents)}, "
+                f"got {tuple(agent_actions.shape[:2])}"
+            )
+        if active_mask.shape != (batch_size, num_agents):
+            raise ValueError(f"Expected active_mask shape {(batch_size, num_agents)}, got {tuple(active_mask.shape)}")
+        if active_mask.dtype != torch.bool:
+            raise TypeError(f"active_mask must use dtype torch.bool, got {active_mask.dtype}")
+
+        active_mask = active_mask.to(device=agent_encodings.device)
+        pooled_outputs = agent_encodings.new_zeros((batch_size, self.output_dim))
+        valid_rows = active_mask.any(dim=1)
+        if not valid_rows.any():
+            return pooled_outputs
+
+        enc_valid = agent_encodings[valid_rows]
+        act_valid = agent_actions[valid_rows]
+        mask_valid = active_mask[valid_rows]
+        token_mask = mask_valid.unsqueeze(-1).to(dtype=enc_valid.dtype)
+        key_padding_mask = ~mask_valid
+
+        action_emb = self.action_embed(act_valid)
+        agent_features = torch.cat([enc_valid, action_emb], dim=-1) * token_mask
+
+        attn_out, _ = self.self_attn(
+            agent_features,
+            agent_features,
+            agent_features,
+            key_padding_mask=key_padding_mask,
+            need_weights=False,
+        )
+        agent_features = self.attn_norm(agent_features + attn_out) * token_mask
+
         ffn_out = self.ffn(agent_features)
-        agent_features = self.ffn_norm(agent_features + ffn_out)  # 残差连接
-        
-        # 5. Mean Pooling（Permutation-Invariant 聚合）
-        pooled = agent_features.mean(dim=1)  # [batch, agent_feature_dim]
-        
-        # 6. 投影到输出维度
-        return self.output_proj(pooled)  # [batch, output_dim]
+        agent_features = self.ffn_norm(agent_features + ffn_out) * token_mask
+
+        pooled_outputs[valid_rows] = self.output_proj(self._masked_mean(agent_features, mask_valid))
+        return pooled_outputs
