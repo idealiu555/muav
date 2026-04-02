@@ -21,12 +21,21 @@ class MARLModel(ABC):
         self.action_dim = action_dim
         self.device = device
 
-    def get_action_and_value(self, obs: np.ndarray, state: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
+    def get_action_and_value(
+        self, obs: np.ndarray, global_state: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
-        Gets actions, log probabilities, and state values.
+        Gets environment actions, raw policy actions, log probabilities, and per-agent value predictions.
         Essential for on-policy algorithms like PPO/MAPPO.
         """
         raise NotImplementedError("This method is required for on-policy algorithms.")
+
+    def train_on_rollout(self, rollout_buffer: object, *, current_update: int, total_updates: int) -> dict:
+        """Optional high-level on-policy training entry point for a full rollout."""
+        _ = rollout_buffer
+        _ = current_update
+        _ = total_updates
+        raise NotImplementedError("This model does not support on-policy rollout training.")
 
     @abstractmethod
     def select_actions(self, observations: list[np.ndarray], exploration: bool) -> np.ndarray:

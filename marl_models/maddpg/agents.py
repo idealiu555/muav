@@ -7,7 +7,7 @@ import numpy as np
 # Network architecture optimizations for training stability:
 # 1. Orthogonal initialization - better gradient flow at init
 # 2. LayerNorm - stable for RL (batch-independent normalization)
-# 3. LeakyReLU - avoids dead neurons problem
+# 3. SiLU - smooth nonlinearity used consistently across local MARL models
 # 4. Residual connections (Critic) - improves gradient flow in deep networks
 
 from marl_models.attention import AttentionEncoder, AgentPoolingAttention, MeanPoolingEncoder
@@ -30,7 +30,7 @@ class ActorNetwork(nn.Module):
         self.ln2: nn.LayerNorm = nn.LayerNorm(config.MLP_HIDDEN_DIM)
         self.out: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, action_dim), std=0.01)
         
-        self.activation = nn.LeakyReLU(0.01)
+        self.activation = nn.SiLU()
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         encoded = self.encoder(input)
@@ -62,7 +62,7 @@ class CriticNetwork(nn.Module):
         # Output layer
         self.out: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, 1))
         
-        self.activation = nn.LeakyReLU(0.01)
+        self.activation = nn.SiLU()
 
     def encode_observations(self, joint_obs: torch.Tensor) -> torch.Tensor:
         batch_size = joint_obs.shape[0]
@@ -108,7 +108,7 @@ class ActorNetworkWithAttention(nn.Module):
         self.ln2 = nn.LayerNorm(config.MLP_HIDDEN_DIM)
         self.out = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, action_dim), std=0.01)
 
-        self.activation = nn.LeakyReLU(0.01)
+        self.activation = nn.SiLU()
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         # 注意力编码
@@ -156,7 +156,7 @@ class CriticNetworkWithAttention(nn.Module):
         self.ln3 = nn.LayerNorm(config.MLP_HIDDEN_DIM)
         self.out = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, 1))
 
-        self.activation = nn.LeakyReLU(0.01)
+        self.activation = nn.SiLU()
 
     def encode_observations(self, joint_obs: torch.Tensor, num_agents: int | None = None) -> torch.Tensor:
         """编码所有 agent 的观测，返回 [batch, N, encoder_dim] 格式。

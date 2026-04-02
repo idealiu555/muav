@@ -116,6 +116,8 @@ UAV 的移动完全由 MARL 智能体控制：
 
 智能体输出 3D 移动向量 $\vec{a}_{\text{move}} = [a_x, a_y, a_z] \in [-1, 1]^3$，系统对向量**模长**进行裁剪（保持方向不变）：
 
+说明：这里采用的是**本地环境的有界动作契约**。动作首先被定义为归一化控制量，再映射到物理移动/波束角语义；这与官方 `onpolicy` 仓库中 Box 动作“同一动作张量直接用于执行与 log-prob 评估”的默认契约并不完全相同。
+
 $$
 \vec{\Delta p} = \frac{\vec{a}_{\text{move}}}{\max(\|\vec{a}_{\text{move}}\|, 1)} \times v^{\text{UAV}} \times \tau
 $$
@@ -1103,7 +1105,7 @@ $$
 
 - **MLP 隐藏层维度**：768
 - **Actor 网络**：`obs_dim → 768 → 768 → action_dim`
-- **Critic 网络**：`(state_dim + total_action_dim) → 768 → 768 → 1`
+- **MAPPO Critic 网络**：`(state_dim + num_agents) → 768 → 768 → 1`
 
 #### 关键超参数
 

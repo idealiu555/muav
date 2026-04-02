@@ -1,7 +1,7 @@
 import numpy as np
 
 # Training Parameters
-MODEL: str = "maddpg"  # options: 'maddpg', 'matd3', 'mappo', 'masac', 'random'
+MODEL: str = "mappo"  # options: 'maddpg', 'matd3', 'mappo', 'masac', 'random'
 SEED: int = 1234  # random seed for reproducibility
 
 # Initialize random state for config parameters to ensure reproducibility
@@ -155,9 +155,18 @@ _OBS_BASE_DIM: int = (OWN_STATE_DIM +
 OBS_DIM_SINGLE: int = _OBS_BASE_DIM + 2
 
 
+# Local environment action contract:
+# - all policies must emit normalized bounded actions in [-1, 1]
+# - movement actions are normalized control magnitudes, not raw physical velocities
+# - beam actions are normalized control signals that the environment maps to angles
+# This is intentionally different from the official onpolicy Box-action path, which
+# evaluates/executes the same unsquashed action tensor without a local tanh-squash contract.
+# Centralized state contract:
+# - STATE_DIM is the public rollout/training state size exposed outside the model
+# - any agent-aware critic input expansion is owned inside MAPPO
 ACTION_DIM: int = 5 if BEAM_CONTROL_ENABLED else 3  # [dx, dy, dz] 或 [dx, dy, dz, beam_theta, beam_phi]
 STATE_DIM: int = NUM_UAVS * OBS_DIM_SINGLE
-MLP_HIDDEN_DIM: int = 768  # increased for high-dim critic input (7660 -> 768)
+MLP_HIDDEN_DIM: int = 768  # shared hidden width for actor/critic MLP blocks
 
 ACTOR_LR: float = 1e-4
 CRITIC_LR: float = 2e-4
@@ -193,8 +202,10 @@ PPO_CLIP_EPS: float = 0.2  # clipping parameter (epsilon) for the PPO surrogate 
 PPO_VALUE_CLIP_EPS: float = 0.2  # clipping parameter for value function (can be same or different from policy clip)
 PPO_ENTROPY_COEF_START: float = 0.01  # initial entropy coefficient (decays over training to prevent entropy explosion)
 PPO_ENTROPY_COEF_END: float = 0.01  # final entropy coefficient
+PPO_ENTROPY_MC_SAMPLES: int = 8  # Monte Carlo samples for squashed-policy entropy estimation
 PPO_GAE_LAMBDA: float = 0.95  # GAE lambda for lower-variance advantage estimation
 PPO_MAX_LOG_RATIO: float = 10.0  # clip log-ratio before exp to avoid numerical spikes
+PPO_VALUE_LOSS_COEF: float = 0.5  # coefficient for value function loss (PPO paper default)
 
 # MASAC Specific Hyperparameters
 ALPHA_LR: float = 3e-4  # learning rate for the entropy temperature alpha

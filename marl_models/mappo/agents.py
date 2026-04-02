@@ -49,8 +49,9 @@ class CriticNetwork(nn.Module):
         self.out: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, 1))
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
+        x: torch.Tensor = state
         # First layer (no residual due to dimension change)
-        x: torch.Tensor = F.silu(self.ln1(self.fc1(state)))
+        x = F.silu(self.ln1(self.fc1(x)))
         # Second layer with residual connection
         residual = x
         x = F.silu(self.ln2(self.fc2(x)))

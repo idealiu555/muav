@@ -77,10 +77,33 @@ class Env:
         self._prepare_for_next_step()
         return self._get_obs()
 
+    def _validate_actions(self, actions: np.ndarray) -> np.ndarray:
+        """Validate the local bounded-action contract for this environment.
+
+        This task uses normalized control actions in [-1, 1] for both movement and
+        beam control. The environment validates that contract and does not clip or
+        sanitize actions during training, so the executed action remains identical to
+        the action implied by the policy rollout data.
+        """
+        actions_arr: np.ndarray = np.asarray(actions, dtype=np.float32)
+        expected_shape: tuple[int, int] = (config.NUM_UAVS, config.ACTION_DIM)
+        if actions_arr.shape != expected_shape:
+            raise ValueError(f"Expected actions shape {expected_shape}, got {actions_arr.shape}")
+
+        if not np.all(np.isfinite(actions_arr)):
+            invalid_count = int((~np.isfinite(actions_arr)).sum())
+            raise ValueError(f"Invalid action values detected: {invalid_count} NaN/Inf elements")
+
+        if np.any(actions_arr < -1.0) or np.any(actions_arr > 1.0):
+            raise ValueError("Actions must be within [-1, 1]")
+
+        return actions_arr
+
     def step(
         self, actions: np.ndarray
     ) -> tuple[list[np.ndarray], list[float], tuple[float, float, float, float, dict, int, int], dict[str, np.ndarray]]:
         """Execute one time step of the simulation."""
+        actions = self._validate_actions(actions)
         self._time_step += 1
         active_mask = np.array([1.0 if uav.active else 0.0 for uav in self._uavs], dtype=np.float32)
 
@@ -295,7 +318,12 @@ class Env:
         return all_obs
 
     def _apply_actions_to_env(self, actions: np.ndarray) -> None:
-        """Apply bounded movement, then evaluate continuous-time safety on active UAV trajectories."""
+        """Apply normalized bounded movement, then evaluate continuous-time safety.
+
+        The first three action dimensions are local normalized movement controls in
+        [-1, 1], which are mapped to per-slot displacement vectors capped by the UAV
+        speed limit.
+        """
         current_positions: np.ndarray = np.array([uav.pos for uav in self._uavs], dtype=np.float64)
         next_positions: np.ndarray = current_positions.copy()
         move_times: np.ndarray = np.zeros(config.NUM_UAVS, dtype=np.float64)
@@ -369,6 +397,8 @@ class Env:
         """Apply beam control actions from the agent.
         
         Actions format: [dx, dy, dz, beam_theta, beam_phi] where beam_* are in [-1, 1]
+        This is the local environment's bounded action contract, not the official
+        onpolicy Box-action contract.
         
         Two modes:
         - offset: beam angles are offsets from centroid direction

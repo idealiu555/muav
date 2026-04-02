@@ -1,5 +1,6 @@
 from marl_models.base_model import MARLModel
-from marl_models.buffer_and_helpers import RolloutBuffer, ReplayBuffer
+from marl_models.buffer_and_helpers import ReplayBuffer
+from marl_models.mappo.rollout_buffer import MAPPORolloutBuffer
 from marl_models.utils import save_models
 from environment.env import Env
 from utils.logger import Logger, Log
@@ -8,7 +9,6 @@ from utils.plot_logs import generate_plots_if_available
 
 # from utils.plot_snapshots import update_trajectories, reset_trajectories  # trajectory tracking, comment if not needed
 import config
-import torch
 import numpy as np
 import time
 
@@ -19,6 +19,10 @@ def _append_active_actions(action_accumulator: list[np.ndarray], actions: np.nda
         action_accumulator.append(active_actions)
 
 
+def _build_global_state(obs: list[np.ndarray]) -> np.ndarray:
+    return np.concatenate(obs, axis=0).astype(np.float32, copy=False)
+
+
 def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: int) -> None:
     start_time: float = time.time()
     if config.PPO_ROLLOUT_LENGTH != config.STEPS_PER_EPISODE:
@@ -26,7 +30,14 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
             "MAPPO uses full-episode rollouts in this finite-horizon environment. "
             "Set PPO_ROLLOUT_LENGTH == STEPS_PER_EPISODE."
         )
-    buffer: RolloutBuffer = RolloutBuffer(num_agents=config.NUM_UAVS, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, state_dim=config.STATE_DIM, buffer_size=config.PPO_ROLLOUT_LENGTH, device=model.device)
+    buffer: MAPPORolloutBuffer = MAPPORolloutBuffer(
+        num_agents=config.NUM_UAVS,
+        obs_dim=config.OBS_DIM_SINGLE,
+        action_dim=config.ACTION_DIM,
+        state_dim=config.STATE_DIM,
+        buffer_size=config.PPO_ROLLOUT_LENGTH,
+        device=model.device,
+    )
     num_updates: int = num_episodes
     save_freq: int = max(1, num_updates // 10)
     if num_updates < 1000:
@@ -42,7 +53,7 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
 
     for update in range(1, num_updates + 1):
         obs: list[np.ndarray] = env.reset()
-        state: np.ndarray = np.concatenate(obs, axis=0)
+        global_state: np.ndarray = _build_global_state(obs)
         rollout_reward: float = 0.0
         rollout_latency: float = 0.0
         rollout_energy: float = 0.0
@@ -58,15 +69,15 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
                 plot_snapshot(env, update, step, logger.log_dir, "update", logger.timestamp)
 
             obs_arr: np.ndarray = np.array(obs)
-            actions, log_probs, values = model.get_action_and_value(obs_arr, state)
+            env_actions, raw_actions, log_probs, values = model.get_action_and_value(obs_arr, global_state)
 
-            next_obs, rewards, (total_latency, total_energy, jfi, total_rate, reward_stats, step_collisions, step_boundaries), _step_info = env.step(actions)
-            _append_active_actions(action_accumulator, actions, _step_info["active_mask"])
+            next_obs, rewards, (total_latency, total_energy, jfi, total_rate, reward_stats, step_collisions, step_boundaries), _step_info = env.step(env_actions)
+            _append_active_actions(action_accumulator, env_actions, _step_info["active_mask"])
             # update_trajectories(env)  # tracking code, comment if not needed
             buffer.add(
-                state,
+                global_state,
                 obs_arr,
-                actions,
+                raw_actions,
                 log_probs,
                 rewards,
                 values,
@@ -74,7 +85,7 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
             )
 
             obs = next_obs
-            state = np.concatenate(next_obs, axis=0)
+            global_state = _build_global_state(next_obs)
 
             rollout_reward += np.sum(rewards)
             rollout_latency += total_latency
@@ -89,21 +100,12 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
                     training_stats_accumulator[key] = []
                 training_stats_accumulator[key].append(value)
 
-        buffer.compute_returns_and_advantages(config.DISCOUNT_FACTOR, config.PPO_GAE_LAMBDA)
-
-        # Calculate current entropy coefficient (linear decay over training)
-        entropy_coef: float = config.PPO_ENTROPY_COEF_START - \
-            (config.PPO_ENTROPY_COEF_START - config.PPO_ENTROPY_COEF_END) * \
-            min(update / num_updates, 1.0)
-
-        for _ in range(config.PPO_EPOCHS):
-            for batch in buffer.get_batches(config.PPO_BATCH_SIZE):
-                stats = model.update(batch, entropy_coef)
-                if stats:
-                    for key, value in stats.items():
-                        if key not in training_stats_accumulator:
-                            training_stats_accumulator[key] = []
-                        training_stats_accumulator[key].append(value)
+        stats = model.train_on_rollout(buffer, current_update=update, total_updates=num_updates)
+        if stats:
+            for key, value in stats.items():
+                if key not in training_stats_accumulator:
+                    training_stats_accumulator[key] = []
+                training_stats_accumulator[key].append(value)
 
         buffer.clear()
 
@@ -120,7 +122,7 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
         if update % config.LOG_FREQ == 0:
             elapsed_time: float = time.time() - start_time
             # Average training statistics
-            averaged_stats: dict = {"entropy_coef": entropy_coef}
+            averaged_stats: dict = {}
             if training_stats_accumulator:
                 for key, values in training_stats_accumulator.items():
                     if key == 'noise_scale':

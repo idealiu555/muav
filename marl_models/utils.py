@@ -54,7 +54,14 @@ def get_model(model_name: str) -> MARLModel:
     elif model_name == "matd3":
         return MATD3(model_name=model_name, num_agents=config.NUM_UAVS, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device=device)
     elif model_name == "mappo":
-        return MAPPO(model_name=model_name, num_agents=config.NUM_UAVS, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, state_dim=config.STATE_DIM, device=device)
+        return MAPPO(
+            model_name=model_name,
+            num_agents=config.NUM_UAVS,
+            obs_dim=config.OBS_DIM_SINGLE,
+            action_dim=config.ACTION_DIM,
+            state_dim=config.STATE_DIM,
+            device=device,
+        )
     elif model_name == "masac":
         return MASAC(model_name=model_name, num_agents=config.NUM_UAVS, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device=device)
     elif model_name == "random":
