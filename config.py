@@ -8,6 +8,7 @@ SEED: int = 1234  # random seed for reproducibility
 _config_rng = np.random.RandomState(SEED)
 STEPS_PER_EPISODE: int = 1000  # total T
 LOG_FREQ: int = 10  # episodes
+PLOT_FREQ: int = 50  # episodes/updates
 IMG_FREQ: int = 500  # steps (increased to reduce I/O overhead)
 TEST_LOG_FREQ: int = 10  # episodes (for testing)
 TEST_IMG_FREQ: int = 1000  # steps (for testing)

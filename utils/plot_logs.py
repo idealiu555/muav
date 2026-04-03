@@ -5,7 +5,7 @@
 
 特性：
 - 指数移动平均(EMA)平滑曲线
-- 置信区间/误差带显示
+- 原始值细线 + EMA 趋势线
 - 学术论文风格排版
 - 支持从保存的日志文件独立绘图
 """
@@ -70,41 +70,48 @@ def smooth_curve(values: np.ndarray, smoothing_weight: float = 0.9) -> np.ndarra
     return smoothed
 
 
-def compute_error_band(values: np.ndarray, window_size: int = 10, smoothing: float = 0.9) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    计算滑动窗口内的标准差作为误差带。
+def _plot_raw_and_ema(
+    ax,
+    x_arr: np.ndarray,
+    y_arr: np.ndarray,
+    color: str,
+    smoothing: float,
+    label: str | None = None,
+    linestyle: str = "-",
+    show_raw: bool = True,
+) -> None:
+    if show_raw and len(y_arr) > 1:
+        ax.plot(
+            x_arr,
+            y_arr,
+            color=color,
+            linewidth=1.0,
+            alpha=0.25,
+            linestyle=linestyle,
+            label="_nolegend_",
+        )
 
-    使用向量化的卷积操作计算滑动窗口均值和标准差，
-    避免了 Python 循环的 O(n × window) 复杂度。
-
-    Args:
-        values: 数据序列
-        window_size: 滑动窗口大小
-        smoothing: EMA平滑权重
-
-    Returns:
-        (下界, 上界, 平滑均值) 数组
-    """
-    n = len(values)
-    if n == 0:
-        return np.array([]), np.array([]), np.array([])
-
-    # 使用卷积计算滑动窗口均值 (O(n) 复杂度)
-    kernel = np.ones(window_size) / window_size
-    rolling_mean = np.convolve(values, kernel, mode='same')
-
-    # 使用卷积计算滑动窗口方差，再转换为标准差
-    # Var(X) = E[X²] - E[X]²
-    rolling_mean_sq = np.convolve(values ** 2, kernel, mode='same')
-    rolling_var = rolling_mean_sq - rolling_mean ** 2
-    # 确保方差非负（数值稳定性）
-    rolling_std = np.sqrt(np.maximum(rolling_var, 0))
-
-    # EMA 平滑
-    smoothed_mean = smooth_curve(rolling_mean, smoothing)
-    smoothed_std = smooth_curve(rolling_std, smoothing)
-
-    return smoothed_mean - smoothed_std, smoothed_mean + smoothed_std, smoothed_mean
+    if len(y_arr) > 1:
+        smoothed_y = smooth_curve(y_arr, smoothing)
+        ax.plot(
+            x_arr,
+            smoothed_y,
+            color=color,
+            linewidth=2.5,
+            alpha=1.0,
+            linestyle=linestyle,
+            label=label,
+        )
+    else:
+        ax.plot(
+            x_arr,
+            y_arr,
+            color=color,
+            linewidth=2.5,
+            alpha=1.0,
+            linestyle=linestyle,
+            label=label,
+        )
 
 
 def plot_metric(
@@ -117,8 +124,6 @@ def plot_metric(
     color: str = COLORS['primary'],
     smoothing: float = 0.9,
     show_raw: bool = True,
-    show_error_band: bool = True,
-    window_size: int = 10
 ) -> None:
     """
     绘制单个指标的学术风格曲线图。
@@ -132,9 +137,7 @@ def plot_metric(
         output_path: 输出文件路径
         color: 主曲线颜色
         smoothing: EMA平滑权重
-        show_raw: 是否显示原始数据点
-        show_error_band: 是否显示误差带
-        window_size: 误差带计算窗口大小
+        show_raw: 是否显示原始数据细线
     """
     with plt.style.context('seaborn-v0_8-whitegrid'):
         plt.rcParams.update(ACADEMIC_STYLE)
@@ -143,20 +146,7 @@ def plot_metric(
         x_arr = np.array(x)
         y_arr = np.array(y)
 
-        # 绘制原始数据点（半透明）
-        if show_raw and len(y_arr) > 1:
-            ax.scatter(x_arr, y_arr, alpha=0.15, s=15, color=color, label='_nolegend_')
-
-        # 绘制误差带和平滑曲线（确保两者来源一致）
-        if show_error_band and len(y_arr) > window_size:
-            lower, upper, smoothed_y = compute_error_band(y_arr, window_size, smoothing)
-            ax.fill_between(x_arr, lower, upper, alpha=0.2, color=color, label='±1 Std Dev')
-            ax.plot(x_arr, smoothed_y, color=color, linewidth=2.5, label='Smoothed')
-        elif len(y_arr) > 1:
-            smoothed_y = smooth_curve(y_arr, smoothing)
-            ax.plot(x_arr, smoothed_y, color=color, linewidth=2.5, label='Smoothed')
-        else:
-            ax.plot(x_arr, y_arr, color=color, linewidth=2.5)
+        _plot_raw_and_ema(ax, x_arr, y_arr, color, smoothing, label="EMA", show_raw=show_raw)
 
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
@@ -166,7 +156,7 @@ def plot_metric(
         ax.xaxis.set_major_locator(MaxNLocator(integer=True))
 
         # 添加图例
-        if show_error_band and len(y_arr) > window_size:
+        if len(y_arr) > 1:
             ax.legend(loc='best', fancybox=True, shadow=False)
 
         plt.tight_layout()
@@ -184,10 +174,9 @@ def plot_metric_comparison(
     title: str,
     output_path: str,
     smoothing: float = 0.9,
-    window_size: int = 10
 ) -> None:
     """
-    绘制两个指标的对比图（双y轴）。
+    绘制两个指标的对比图（双y轴，原始值 + EMA）。
 
     Args:
         x: x轴数据
@@ -199,7 +188,6 @@ def plot_metric_comparison(
         title: 图标题
         output_path: 输出文件路径
         smoothing: EMA平滑权重
-        window_size: 误差带计算窗口大小
     """
     with plt.style.context('seaborn-v0_8-whitegrid'):
         plt.rcParams.update(ACADEMIC_STYLE)
@@ -213,30 +201,14 @@ def plot_metric_comparison(
         color1 = COLORS['primary']
         ax1.set_xlabel(xlabel)
         ax1.set_ylabel(ylabel1, color=color1)
-        if len(y1_arr) > window_size:
-            lower1, upper1, smoothed_y1 = compute_error_band(y1_arr, window_size, smoothing)
-            ax1.plot(x_arr, smoothed_y1, color=color1, linewidth=2.5, label=ylabel1)
-            ax1.fill_between(x_arr, lower1, upper1, alpha=0.15, color=color1)
-        elif len(y1_arr) > 1:
-            smoothed_y1 = smooth_curve(y1_arr, smoothing)
-            ax1.plot(x_arr, smoothed_y1, color=color1, linewidth=2.5, label=ylabel1)
-        else:
-            ax1.plot(x_arr, y1_arr, color=color1, linewidth=2.5, label=ylabel1)
+        _plot_raw_and_ema(ax1, x_arr, y1_arr, color1, smoothing, label=ylabel1)
         ax1.tick_params(axis='y', labelcolor=color1)
 
         # 第二个指标（共享x轴）
         ax2 = ax1.twinx()
         color2 = COLORS['secondary']
         ax2.set_ylabel(ylabel2, color=color2)
-        if len(y2_arr) > window_size:
-            lower2, upper2, smoothed_y2 = compute_error_band(y2_arr, window_size, smoothing)
-            ax2.plot(x_arr, smoothed_y2, color=color2, linewidth=2.5, linestyle='--', label=ylabel2)
-            ax2.fill_between(x_arr, lower2, upper2, alpha=0.15, color=color2)
-        elif len(y2_arr) > 1:
-            smoothed_y2 = smooth_curve(y2_arr, smoothing)
-            ax2.plot(x_arr, smoothed_y2, color=color2, linewidth=2.5, linestyle='--', label=ylabel2)
-        else:
-            ax2.plot(x_arr, y2_arr, color=color2, linewidth=2.5, linestyle='--', label=ylabel2)
+        _plot_raw_and_ema(ax2, x_arr, y2_arr, color2, smoothing, label=ylabel2, linestyle='--')
         ax2.tick_params(axis='y', labelcolor=color2)
 
         ax1.set_title(title, fontweight='bold', pad=10)

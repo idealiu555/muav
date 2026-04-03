@@ -41,8 +41,8 @@ class Logger:
             os.makedirs(log_dir)
         self.timestamp: str = timestamp
         self.log_dir: str = log_dir
-        self.log_file_path: str = os.path.join(self.log_dir, f"logs_{timestamp}.txt")
         self.json_file_path: str = os.path.join(self.log_dir, f"log_data_{timestamp}.json")
+        self.debug_json_file_path: str = os.path.join(self.log_dir, f"debug_data_{timestamp}.json")
         self.config_file_path: str = os.path.join(self.log_dir, f"config_{timestamp}.json")
 
     def log_configs(self) -> None:
@@ -75,7 +75,53 @@ class Logger:
                 setattr(default_config, key, value)
         print(f"✅ Configs loaded from {config_path}")
 
-    def log_metrics(self, progress_step: int, log: Log, log_freq: int, elapsed_time: float, name: str, training_stats: dict | None = None) -> None:
+    def log_point(
+        self,
+        progress_step: int,
+        reward: float,
+        latency: float,
+        energy: float,
+        fairness: float,
+        rate: float,
+        collisions: int,
+        boundaries: int,
+        name: str,
+        elapsed_time: float | None = None,
+    ) -> None:
+        data_entry: dict = {
+            name.lower(): progress_step,
+            "reward": float(reward),
+            "latency": float(latency),
+            "energy": float(energy),
+            "fairness": float(fairness),
+            "rate": float(rate),
+            "collisions": int(collisions),
+            "boundaries": int(boundaries),
+        }
+        if elapsed_time is not None:
+            data_entry["time"] = float(elapsed_time)
+
+        with open(self.json_file_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(data_entry) + "\n")
+
+    def log_debug_metrics(
+        self,
+        progress_step: int,
+        metrics: dict,
+        name: str,
+        elapsed_time: float | None = None,
+    ) -> None:
+        data_entry: dict = {
+            name.lower(): progress_step,
+        }
+        if elapsed_time is not None:
+            data_entry["time"] = float(elapsed_time)
+        data_entry.update(metrics)
+
+        with open(self.debug_json_file_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(data_entry) + "\n")
+
+    def log_metrics(self, progress_step: int, log: Log, log_freq: int, elapsed_time: float, name: str) -> None:
         rewards_slice: np.ndarray = np.array(log.rewards[-log_freq:])
         latencies_slice: np.ndarray = np.array(log.latencies[-log_freq:])
         energies_slice: np.ndarray = np.array(log.energies[-log_freq:])
@@ -105,31 +151,4 @@ class Logger:
             f"Bnd: {boundaries_latest} | "
             f"Time: {elapsed_time:.2f}s\n"
         )
-
-        with open(self.log_file_path, "a", encoding="utf-8") as f:
-            f.write(log_msg)
-
-        data_entry: dict = {
-            name.lower(): progress_step,
-            "reward": reward_avg,
-            "reward_std": reward_std,
-            "latency": latency_avg,
-            "latency_std": latency_std,
-            "energy": energy_avg,
-            "energy_std": energy_std,
-            "fairness": fairness_avg,
-            "rate": rate_avg,
-            "rate_std": rate_std,
-            "collisions": collisions_latest,
-            "boundaries": boundaries_latest,
-            "time": elapsed_time
-        }
-        
-        # Add training statistics if provided
-        if training_stats:
-            data_entry.update(training_stats)
-        
-        # Use append mode for O(1) write instead of O(N) read+write
-        # This prevents O(N²) complexity in long training runs
-        with open(self.json_file_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(data_entry) + "\n")
+        print(log_msg, end="")
