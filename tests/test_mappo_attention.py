@@ -54,6 +54,23 @@ def test_attention_actor_outputs_correct_distribution_shape() -> None:
     assert tuple(dist.sample().shape) == (config.NUM_UAVS, config.ACTION_DIM)
 
 
+def test_non_attention_actor_uses_mean_pooling_encoder() -> None:
+    from marl_models.attention import MeanPoolingEncoder
+    from marl_models.mappo.agents import ActorNetwork
+
+    actor = ActorNetwork(config.OBS_DIM_SINGLE, config.ACTION_DIM)
+    obs = torch.from_numpy(_fake_obs())
+
+    assert isinstance(actor.encoder, MeanPoolingEncoder)
+
+    encoded = actor.encoder(obs)
+    dist = actor(obs)
+
+    assert tuple(encoded.shape) == (config.NUM_UAVS, actor.encoder.output_dim)
+    assert tuple(dist.mean.shape) == (config.NUM_UAVS, config.ACTION_DIM)
+    assert tuple(dist.stddev.shape) == (config.NUM_UAVS, config.ACTION_DIM)
+
+
 def test_attention_critic_outputs_one_value_per_agent_sample() -> None:
     from marl_models.mappo.agents import AttentionCriticNetwork
 

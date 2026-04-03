@@ -11,6 +11,27 @@ from marl_models.attention import AttentionEncoder
 from marl_models.maddpg.agents import CriticNetworkWithAttention
 
 
+def test_repo_uses_silu_instead_of_legacy_leaky_activation() -> None:
+    root = Path(__file__).resolve().parents[1]
+    offenders: list[str] = []
+    module_name = "Leaky" + "ReLU"
+    func_name = "leaky" + "_relu"
+
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.suffix not in {".py", ".md"}:
+            continue
+        if "__pycache__" in path.parts:
+            continue
+
+        text = path.read_text(encoding="utf-8")
+        if module_name in text or func_name in text:
+            offenders.append(str(path.relative_to(root)))
+
+    assert offenders == [], f"Found leaky ReLU references in: {offenders}"
+
+
 def test_agent_pooling_returns_zero_for_all_inactive_rows() -> None:
     torch.manual_seed(0)
     module = AgentPoolingAttention(encoder_dim=32, action_dim=3, action_embed_dim=8, num_heads=4)

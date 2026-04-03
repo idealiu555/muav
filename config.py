@@ -128,12 +128,12 @@ REWARD_SCALING_FACTOR: float = 0.12  # scaling factor for rewards (归一化后�
 
 # Balanced scales to make log1p(scaled) ≈ 1.5-2.0 for each component
 LATENCY_REWARD_SCALE: float = NUM_UES * TIME_SLOT_DURATION * 6  # ~600, scaled_latency ≈ 7
-ENERGY_REWARD_SCALE: float = NUM_UAVS * POWER_HOVER * TIME_SLOT_DURATION * 3  # ~1200, scaled_energy ≈ 3.5
-RATE_REWARD_SCALE: float = 5e7  # scaled_rate ≈ 5-6
+ENERGY_REWARD_SCALE: float = NUM_UAVS * POWER_HOVER * TIME_SLOT_DURATION * 0.6  # 400
+RATE_REWARD_SCALE: float = 1e8
 
 # JFI reward parameters (balanced around midpoint)
 JFI_BASELINE: float = 0.6  # JFI midpoint: symmetric reward/penalty
-JFI_SCALE: float = 5.0    # Moderate scaling for JFI deviation
+JFI_SCALE: float = 6.0    # Moderate scaling for JFI deviation
 JFI_CLIP_MIN: float = -2.0  # Narrower clip range
 JFI_CLIP_MAX: float = 2.0
 

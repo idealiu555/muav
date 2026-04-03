@@ -54,9 +54,9 @@ class UEEmbedding(nn.Module):
         file_id = (ue_features[:, :, 3] * config.NUM_FILES).round().long().clamp(0, config.NUM_FILES - 1)
         cache_hit = ue_features[:, :, 4:5]
 
-        pos_emb = F.leaky_relu(self.pos_embed(pos), 0.01)
+        pos_emb = F.silu(self.pos_embed(pos))
         file_emb = self.file_embed(file_id)
-        hit_emb = F.leaky_relu(self.cache_hit_embed(cache_hit), 0.01)
+        hit_emb = F.silu(self.cache_hit_embed(cache_hit))
 
         ue_emb = torch.cat([pos_emb, file_emb, hit_emb], dim=-1)
         return self.layer_norm(ue_emb)
@@ -93,9 +93,9 @@ class NeighborEmbedding(nn.Module):
         cache = neighbor_features[:, :, 3:3 + config.NUM_FILES]
         processed = neighbor_features[:, :, -3:]
 
-        pos_emb = F.leaky_relu(self.pos_embed(pos), 0.01)
-        cache_emb = F.leaky_relu(self.cache_embed(cache), 0.01)
-        processed_emb = F.leaky_relu(self.processed_embed(processed), 0.01)
+        pos_emb = F.silu(self.pos_embed(pos))
+        cache_emb = F.silu(self.cache_embed(cache))
+        processed_emb = F.silu(self.processed_embed(processed))
 
         neighbor_emb = torch.cat([pos_emb, cache_emb, processed_emb], dim=-1)
         return self.layer_norm(neighbor_emb)
@@ -127,9 +127,9 @@ class UAVEmbedding(nn.Module):
         Returns:
             uav_embedding: [batch, embed_dim]
         """
-        pos_emb = F.leaky_relu(self.pos_embed(uav_pos), 0.01)
-        cache_emb = F.leaky_relu(self.cache_embed(uav_cache), 0.01)
-        active_emb = F.leaky_relu(self.active_embed(uav_active), 0.01)
+        pos_emb = F.silu(self.pos_embed(uav_pos))
+        cache_emb = F.silu(self.cache_embed(uav_cache))
+        active_emb = F.silu(self.active_embed(uav_active))
         uav_emb = torch.cat([pos_emb, cache_emb, active_emb], dim=-1)
         return self.layer_norm(uav_emb)
 
@@ -400,7 +400,7 @@ class AgentPoolingAttention(nn.Module):
         self.action_embed = nn.Sequential(
             layer_init(nn.Linear(action_dim, action_embed_dim)),
             nn.LayerNorm(action_embed_dim),
-            nn.LeakyReLU(0.01)
+            nn.SiLU()
         )
         
         # Agent 特征维度 = encoder_dim + action_embed_dim
@@ -418,7 +418,7 @@ class AgentPoolingAttention(nn.Module):
         # FFN 层（增强表达能力）
         self.ffn = nn.Sequential(
             layer_init(nn.Linear(agent_feature_dim, agent_feature_dim * 2)),
-            nn.LeakyReLU(0.01),
+            nn.SiLU(),
             layer_init(nn.Linear(agent_feature_dim * 2, agent_feature_dim))
         )
         self.ffn_norm = nn.LayerNorm(agent_feature_dim)
@@ -478,7 +478,7 @@ class AgentPoolingValue(nn.Module):
         self.attn_norm = nn.LayerNorm(encoder_dim)
         self.ffn = nn.Sequential(
             layer_init(nn.Linear(encoder_dim, encoder_dim * 2)),
-            nn.LeakyReLU(0.01),
+            nn.SiLU(),
             layer_init(nn.Linear(encoder_dim * 2, encoder_dim)),
         )
         self.ffn_norm = nn.LayerNorm(encoder_dim)

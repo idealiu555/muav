@@ -101,10 +101,12 @@ class _ScalarValueHead(nn.Module):
 class ActorNetwork(nn.Module):
     def __init__(self, obs_dim: int, action_dim: int) -> None:
         super(ActorNetwork, self).__init__()
-        self.policy = _GaussianPolicyHead(obs_dim, action_dim)
+        self.encoder = MeanPoolingEncoder()
+        self.policy = _GaussianPolicyHead(self.encoder.output_dim, action_dim)
 
     def forward(self, obs: torch.Tensor) -> Normal:
-        return self.policy(obs)
+        encoded = self.encoder(obs)
+        return self.policy(encoded)
 
 
 class AttentionActorNetwork(nn.Module):
