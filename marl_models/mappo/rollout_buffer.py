@@ -22,6 +22,7 @@ class MAPPORolloutBuffer:
         self.use_pinned_memory: bool = self.train_device.type == "cuda"
 
         self.observations: torch.Tensor = self._allocate_float_storage(buffer_size, num_agents, obs_dim)
+        self.share_obs: torch.Tensor = self._allocate_float_storage(buffer_size, num_agents * obs_dim)
         self.raw_actions: torch.Tensor = self._allocate_float_storage(buffer_size, num_agents, action_dim)
         self.log_probs: torch.Tensor = self._allocate_float_storage(buffer_size, num_agents)
         self.rewards: torch.Tensor = self._allocate_float_storage(buffer_size, num_agents)
@@ -31,9 +32,6 @@ class MAPPORolloutBuffer:
         self.returns: torch.Tensor = self._allocate_float_storage(buffer_size, num_agents)
 
         self.step: int = 0
-        self._flat_step_indices: torch.Tensor | None = None
-        self._flat_agent_indices: torch.Tensor | None = None
-        self._cached_num_steps: int = -1
 
     def _allocate_float_storage(self, *shape: int) -> torch.Tensor:
         return torch.zeros(
@@ -59,31 +57,13 @@ class MAPPORolloutBuffer:
         src = torch.from_numpy(self._coerce_float32_array(value, expected_shape, name))
         dest.copy_(src)
 
-    def _invalidate_index_cache(self) -> None:
-        self._flat_step_indices = None
-        self._flat_agent_indices = None
-        self._cached_num_steps = -1
-
-    def _ensure_index_cache(self, num_steps: int) -> None:
-        if self._cached_num_steps == num_steps:
-            return
-
-        if num_steps <= 0:
-            self._invalidate_index_cache()
-            return
-
-        step_indices = torch.arange(num_steps, dtype=torch.long, device=self.storage_device)
-        agent_indices = torch.arange(self.num_agents, dtype=torch.long, device=self.storage_device)
-        self._flat_step_indices = step_indices.repeat_interleave(self.num_agents)
-        self._flat_agent_indices = agent_indices.repeat(num_steps)
-        self._cached_num_steps = num_steps
-
     def _to_train_device(self, tensor: torch.Tensor) -> torch.Tensor:
         return tensor.to(self.train_device, non_blocking=self.use_pinned_memory)
 
     def add(
         self,
         obs: np.ndarray,
+        share_obs: np.ndarray,
         raw_actions: np.ndarray,
         log_probs: np.ndarray,
         rewards: list[float],
@@ -94,6 +74,7 @@ class MAPPORolloutBuffer:
             raise ValueError("Rollout buffer overflow")
 
         self._copy_into_step(self.observations[self.step], obs, (self.num_agents, self.obs_dim), "obs")
+        self._copy_into_step(self.share_obs[self.step], share_obs, (self.num_agents * self.obs_dim,), "share_obs")
         self._copy_into_step(self.raw_actions[self.step], raw_actions, (self.num_agents, self.action_dim), "raw_actions")
         self._copy_into_step(self.log_probs[self.step], log_probs, (self.num_agents,), "log_probs")
         self._copy_into_step(self.rewards[self.step], rewards, (self.num_agents,), "rewards")
@@ -101,7 +82,6 @@ class MAPPORolloutBuffer:
         self._copy_into_step(self.active_masks[self.step], active_mask, (self.num_agents,), "active_mask")
 
         self.step += 1
-        self._invalidate_index_cache()
 
     def compute_returns_and_advantages(self, gamma: float, gae_lambda: float) -> None:
         num_steps = self.step
@@ -153,11 +133,8 @@ class MAPPORolloutBuffer:
         if num_samples == 0:
             return
 
-        self._ensure_index_cache(num_steps)
-        assert self._flat_step_indices is not None
-        assert self._flat_agent_indices is not None
-
         obs_flat = self.observations[:num_steps].reshape(num_samples, self.obs_dim)
+        share_obs_flat = self.share_obs[:num_steps].repeat_interleave(self.num_agents, dim=0)
         raw_actions_flat = self.raw_actions[:num_steps].reshape(num_samples, self.action_dim)
         log_probs_flat = self.log_probs[:num_steps].reshape(num_samples)
         advantages_flat = self.advantages[:num_steps].reshape(num_samples)
@@ -168,16 +145,9 @@ class MAPPORolloutBuffer:
 
         for start in range(0, num_samples, batch_size):
             batch_indices = permuted_indices[start : start + batch_size]
-            step_indices = self._flat_step_indices[batch_indices]
-            agent_indices = self._flat_agent_indices[batch_indices]
-            unique_step_indices, joint_obs_index = torch.unique(step_indices, sorted=True, return_inverse=True)
-
             yield {
-                "joint_obs": self._to_train_device(self.observations[unique_step_indices]),
-                "joint_active_mask": self._to_train_device(self.active_masks[unique_step_indices]).bool(),
-                "joint_obs_index": self._to_train_device(joint_obs_index),
-                "agent_index": self._to_train_device(agent_indices),
                 "obs": self._to_train_device(obs_flat[batch_indices]),
+                "share_obs": self._to_train_device(share_obs_flat[batch_indices]),
                 "raw_actions": self._to_train_device(raw_actions_flat[batch_indices]),
                 "old_log_probs": self._to_train_device(log_probs_flat[batch_indices]),
                 "advantages": self._to_train_device(advantages_flat[batch_indices]),
@@ -188,4 +158,3 @@ class MAPPORolloutBuffer:
 
     def clear(self) -> None:
         self.step = 0
-        self._invalidate_index_cache()

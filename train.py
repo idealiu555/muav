@@ -70,6 +70,7 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
             # update_trajectories(env)  # tracking code, comment if not needed
             buffer.add(
                 obs_arr,
+                obs_arr.reshape(-1),
                 raw_actions,
                 log_probs,
                 rewards,

@@ -100,6 +100,13 @@ class MAPPO(MARLModel):
         active_mask_np = (obs[:, self.active_flag_index] >= 0.5).astype(np.float32)
         return torch.from_numpy(active_mask_np).to(self.device, non_blocking=True)
 
+    def _build_share_obs(self, obs_arr: np.ndarray) -> torch.Tensor:
+        expected_obs_shape: tuple[int, int] = (self.num_agents, self.obs_dim)
+        if obs_arr.shape != expected_obs_shape:
+            raise ValueError(f"Expected obs shape {expected_obs_shape}, got {obs_arr.shape}")
+        share_obs = np.ascontiguousarray(obs_arr.reshape(1, -1), dtype=np.float32)
+        return torch.from_numpy(share_obs).to(self.device, non_blocking=True)
+
     def _squash_actions(self, raw_actions: torch.Tensor) -> torch.Tensor:
         """Map Gaussian samples to the local environment's bounded action contract."""
         return torch.tanh(raw_actions)
@@ -152,18 +159,17 @@ class MAPPO(MARLModel):
             raise ValueError("obs contains NaN or Inf values")
 
         obs_tensor: torch.Tensor = torch.from_numpy(obs_arr).to(self.device, non_blocking=True)
+        share_obs: torch.Tensor = self._build_share_obs(obs_arr)
         active_mask: torch.Tensor = self._get_active_mask(obs)
         action_mask: torch.Tensor = active_mask.unsqueeze(1)
-        agent_index: torch.Tensor = torch.arange(self.num_agents, device=self.device, dtype=torch.long)
-        critic_joint_obs: torch.Tensor = obs_tensor.unsqueeze(0)
-        critic_active_mask: torch.Tensor = active_mask.unsqueeze(0).bool()
 
         with torch.no_grad():
             dist: Normal = self.actors(obs_tensor)
             raw_actions: torch.Tensor = dist.sample()
             env_actions, log_probs = self._squashed_log_prob_from_raw_actions(dist, raw_actions)
             env_actions = env_actions * action_mask
-            values: torch.Tensor = self.critics(critic_joint_obs, agent_index, critic_active_mask)
+            shared_value: torch.Tensor = self.critics(share_obs)
+            values: torch.Tensor = shared_value.repeat(self.num_agents)
 
         return (
             env_actions.cpu().numpy(),
@@ -185,10 +191,7 @@ class MAPPO(MARLModel):
         old_log_probs_batch: torch.Tensor = batch["old_log_probs"]
         advantages_batch: torch.Tensor = batch["advantages"]
         returns_batch: torch.Tensor = batch["returns"]
-        joint_obs_batch: torch.Tensor = batch["joint_obs"]
-        joint_active_mask_batch: torch.Tensor = batch["joint_active_mask"]
-        joint_obs_index_batch: torch.Tensor | None = batch.get("joint_obs_index")
-        agent_index_batch: torch.Tensor = batch["agent_index"]
+        share_obs_batch: torch.Tensor = batch["share_obs"]
         old_values_batch: torch.Tensor = batch["old_values"]
         active_mask_batch: torch.Tensor = batch["active_mask"]
 
@@ -229,12 +232,7 @@ class MAPPO(MARLModel):
         actor_loss = actor_loss - self.entropy_coef * entropy
 
         # Critic Loss (masked)
-        values: torch.Tensor = self.critics(
-            joint_obs_batch,
-            agent_index_batch,
-            joint_active_mask_batch,
-            sample_index=joint_obs_index_batch,
-        )
+        values: torch.Tensor = self.critics(share_obs_batch)
         values_clipped: torch.Tensor = old_values_batch + torch.clamp(values - old_values_batch, -config.PPO_VALUE_CLIP_EPS, config.PPO_VALUE_CLIP_EPS)
         vf_loss1: torch.Tensor = (values - returns_batch).pow(2)
         vf_loss2: torch.Tensor = (values_clipped - returns_batch).pow(2)
