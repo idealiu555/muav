@@ -3,6 +3,8 @@ from collections.abc import Generator
 import numpy as np
 import torch
 
+from marl_models.mappo.value_norm import ValueNorm
+
 
 class MAPPORolloutBuffer:
     def __init__(
@@ -83,7 +85,12 @@ class MAPPORolloutBuffer:
 
         self.step += 1
 
-    def compute_returns_and_advantages(self, gamma: float, gae_lambda: float) -> None:
+    def compute_returns_and_advantages(
+        self,
+        gamma: float,
+        gae_lambda: float,
+        value_normalizer: ValueNorm | None = None,
+    ) -> None:
         num_steps = self.step
         if num_steps == 0:
             return
@@ -99,11 +106,21 @@ class MAPPORolloutBuffer:
                 next_values = self.values[t + 1]
                 next_non_terminal = self.active_masks[t] * self.active_masks[t + 1]
 
-            delta = self.rewards[t] + gamma * next_values * next_non_terminal - self.values[t]
+            current_values = self.values[t]
+            if value_normalizer is not None:
+                current_values = value_normalizer.denormalize(current_values).to(self.storage_device)
+                next_values = value_normalizer.denormalize(next_values).to(self.storage_device)
+
+            delta = self.rewards[t] + gamma * next_values * next_non_terminal - current_values
             last_gae_lam = delta + gamma * gae_lambda * last_gae_lam * next_non_terminal
             self.advantages[t].copy_(last_gae_lam)
 
-        self.returns[:num_steps].copy_(self.advantages[:num_steps] + self.values[:num_steps])
+        if value_normalizer is None:
+            returns = self.advantages[:num_steps] + self.values[:num_steps]
+        else:
+            denormalized_values = value_normalizer.denormalize(self.values[:num_steps]).to(self.storage_device)
+            returns = self.advantages[:num_steps] + denormalized_values
+        self.returns[:num_steps].copy_(returns)
 
     def normalize_advantages(self) -> None:
         num_steps = self.step

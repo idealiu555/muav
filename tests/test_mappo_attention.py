@@ -65,9 +65,11 @@ def test_non_attention_actor_outputs_distribution_from_raw_obs() -> None:
     assert tuple(dist.mean.shape) == (config.NUM_UAVS, config.ACTION_DIM)
     assert tuple(dist.stddev.shape) == (config.NUM_UAVS, config.ACTION_DIM)
     assert actor.policy.fc1.in_features == config.OBS_DIM_SINGLE
+    assert actor.policy.input_norm.normalized_shape == (config.OBS_DIM_SINGLE,)
     assert actor.policy.fc2.out_features == config.MLP_HIDDEN_DIM
     assert actor.policy.ln1.normalized_shape == (config.MLP_HIDDEN_DIM,)
     assert actor.policy.ln2.normalized_shape == (config.MLP_HIDDEN_DIM,)
+    assert isinstance(actor.policy.activation, torch.nn.SiLU)
 
 
 def test_attention_critic_outputs_one_value_per_agent_sample() -> None:
@@ -101,9 +103,11 @@ def test_critic_accepts_flattened_share_obs_and_returns_scalar_values() -> None:
 
     assert tuple(values.shape) == (4,)
     assert critic.value_head.fc1.in_features == config.NUM_UAVS * config.OBS_DIM_SINGLE
+    assert critic.value_head.input_norm.normalized_shape == (config.NUM_UAVS * config.OBS_DIM_SINGLE,)
     assert critic.value_head.fc3.out_features == config.MLP_HIDDEN_DIM
     assert critic.value_head.ln1.normalized_shape == (config.MLP_HIDDEN_DIM,)
     assert critic.value_head.ln3.normalized_shape == (config.MLP_HIDDEN_DIM,)
+    assert isinstance(critic.value_head.activation, torch.nn.SiLU)
 
 
 def test_mappo_constructor_selects_attention_and_non_attention_branches(monkeypatch) -> None:
@@ -124,6 +128,7 @@ def test_mappo_constructor_selects_attention_and_non_attention_branches(monkeypa
     )
     assert isinstance(model.actors, ActorNetwork)
     assert isinstance(model.critics, CriticNetwork)
+    assert hasattr(model, "value_normalizer")
     env_actions, raw_actions, log_probs, values = model.get_action_and_value(obs)
     assert tuple(env_actions.shape) == (config.NUM_UAVS, config.ACTION_DIM)
     assert tuple(raw_actions.shape) == (config.NUM_UAVS, config.ACTION_DIM)
@@ -140,6 +145,7 @@ def test_mappo_constructor_selects_attention_and_non_attention_branches(monkeypa
     )
     assert isinstance(model.actors, AttentionActorNetwork)
     assert isinstance(model.critics, AttentionCriticNetwork)
+    assert hasattr(model, "value_normalizer")
     env_actions, raw_actions, log_probs, values = model.get_action_and_value(obs)
     assert tuple(env_actions.shape) == (config.NUM_UAVS, config.ACTION_DIM)
     assert tuple(raw_actions.shape) == (config.NUM_UAVS, config.ACTION_DIM)
@@ -347,6 +353,42 @@ def test_mappo_update_minibatch_uses_share_obs(monkeypatch) -> None:
         assert stats["critic_loss"] >= 0.0
         assert torch.isfinite(torch.tensor(stats["actor_loss"]))
         assert torch.isfinite(torch.tensor(stats["critic_loss"]))
+
+
+def test_mappo_critic_loss_uses_value_normalizer(monkeypatch) -> None:
+    monkeypatch.setattr(config, "USE_ATTENTION", False)
+    model = MAPPO(
+        model_name="mappo",
+        num_agents=config.NUM_UAVS,
+        obs_dim=config.OBS_DIM_SINGLE,
+        action_dim=config.ACTION_DIM,
+        device="cpu",
+    )
+
+    obs = _make_training_obs()
+    share_obs = _flatten_share_obs(obs)
+    _env_actions, raw_actions, log_probs, values = model.get_action_and_value(obs)
+    old_values = torch.from_numpy(values).float()
+    returns = old_values + 3.0
+
+    batch = {
+        "obs": torch.from_numpy(obs),
+        "share_obs": torch.from_numpy(np.repeat(share_obs[None, :], config.NUM_UAVS, axis=0)),
+        "raw_actions": torch.from_numpy(raw_actions),
+        "old_log_probs": torch.from_numpy(log_probs),
+        "advantages": torch.full((config.NUM_UAVS,), 0.25, dtype=torch.float32),
+        "returns": returns,
+        "old_values": old_values,
+        "active_mask": torch.ones(config.NUM_UAVS, dtype=torch.float32),
+        "agent_index": torch.arange(config.NUM_UAVS, dtype=torch.long),
+    }
+
+    mean_before, _var_before = model.value_normalizer.running_mean_var()
+    stats = model._update_minibatch(batch)
+    mean_after, _var_after = model.value_normalizer.running_mean_var()
+
+    assert stats["critic_loss"] >= 0.0
+    assert not torch.allclose(mean_before, mean_after)
 
 
 def test_mappo_load_round_trips_checkpoint_state(monkeypatch, tmp_path) -> None:

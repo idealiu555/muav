@@ -1,5 +1,7 @@
 # 多无人机空中基站通信保障系统 —— 技术详解文档
 
+> 状态说明（2026-04-04 校准）：本文档已根据当前仓库实现重新核对。特别是 MAPPO 的 critic 语义、训练日志格式、离线绘图链路与 attention/non-attention 分支说明，均已对齐当前代码，而非历史版本。
+
 ## 目录
 
 - [1. 项目概述](#1-项目概述)
@@ -122,11 +124,15 @@ $$
 
 #### 2.2.2 UAV 移动模型 —— 智能体控制
 
-UAV 的移动完全由 MARL 智能体控制：
+UAV 的移动与波束控制完全由 MARL 智能体配置：
 
 **动作解释：**
 
-智能体输出 3D 移动向量 $\vec{a}_{\text{move}} = [a_x, a_y, a_z] \in [-1, 1]^3$，系统对向量**模长**进行裁剪（保持方向不变）：
+智能体根据不同配置输出连续动作向量：
+若 `BEAM_CONTROL_ENABLED = True`，输出为 **5 维**向量 $\vec{a} = [a_x, a_y, a_z, a_\theta, a_\phi] \in [-1, 1]^5$；
+若未启用，输出为 **3 维**移动向量 $\vec{a}_{\text{move}} = [a_x, a_y, a_z] \in [-1, 1]^3$。
+
+系统对位移相关向量**模长**进行裁剪（保持方向不变）：
 
 说明：这里采用的是**本地环境的有界动作契约**。动作首先被定义为归一化控制量，再映射到物理移动/波束角语义；这与官方 `onpolicy` 仓库中 Box 动作“同一动作张量直接用于执行与 log-prob 评估”的默认契约并不完全相同。
 
@@ -786,11 +792,198 @@ $$
 
 其中 $S_k$ 为文件 $k$ 的大小（bytes）。
 
-#### 2.4.3 排队时延模型
+#### 2.4.3 排队时延模型详解
 
-系统采用**全双工 + 跨时隙积压**模型：
+系统采用**全双工 + 跨时隙积压**模型，准确模拟现实物理约束下的串行处理：
 
-**本时隙排队等待：**
+##### 2.4.3.1 时隙内排队机制
+
+在每个时隙内，不同链路上的传输可以**并行进行**（全双工），但同一链路上新的传输必须**等待前一个传输完成再开始**。系统通过跟踪**积压变量**（backlog）记录链路忙碌程度：
+
+**三种链路类型的排队模式：**
+
+| 链路类型 | 多址模式 | 并行能力 | 积压管理 | 说明 |
+|---------|---------|---------|---------|------|
+| Edge Link (UE-UAV) | OFDMA | ✓ 同UAV多UE并行 | 单UAV维护_tx/rx_time_ue_uav | 不同UE用不同子载波，同时发送请求和接收数据 |
+| Inter-UAV | FDM | ✓ 多请求方并行 | 协作者维护per-requester积压 | 不同请求方用不同频段，协作者的总功率分割 |
+| Backhaul (UAV-MBS) | 点对点 | ✗ 点对点排队 | 单UAV维护_tx/rx_time_uav_mbs | 上下行全双工但属于同一UAV，新请求须排队 |
+
+##### 2.4.3.2 跨时隙积压的数学模型
+
+**积压变量定义：**
+
+系统为每个 UAV 维护以下积压状态变量（单位：秒），表示该 UAV 在该链路上的**解决未决传输需求的时间**：
+- `_backlog_tx_uav_mbs`: UAV → MBS 上行链路的发送积压（来自前续时隙）
+- `_backlog_rx_uav_mbs`: MBS → UAV 下行链路的接收积压
+- 类似的 UAV-UAV 链路积压
+
+**本时隙排队等待计算：**
+
+假设在第 $t$ 时隙，某 UAV 有新的传输任务需要在某条链路上处理：
+
+$$
+t_{\text{wait}} = \max
+\begin{cases}
+\text{backlog\_tx} + \text{current\_tx\_time}, & \text{(发送方等待)} \\
+\text{backlog\_rx} + \text{current\_rx\_time}  & \text{(接收方等待)}
+\end{cases}
+$$
+
+其中：
+- `backlog_*`: 前续时隙遗留的未完成时间
+- `current_*_time`: 本时隙新请求的传输时间累积
+
+**状态更新规则（每时隙末）：**
+
+1. **衰减阶段**（模拟时间前进）：
+   ```
+   new_backlog = max(old_backlog - tau, 0.0)  # tau=1时隙
+   ```
+
+2. **累积阶段**（新请求加入）：
+   ```
+   new_backlog += current_tx_time  # 或 current_rx_time
+   current_tx_time = 0.0  # 重置本时隙累积
+   ```
+
+**示例场景**（两个连续时隙）：
+
+```
+时隙 t=0:
+  - UAV_1 请求 MBS，传输时间 t_tx0 = 0.5s
+  - 当前 backlog_tx = 0
+  - 等待时间 = max(0 + 0) = 0
+  - 完整传输 = 0 + 0.5 = 0.5s > tau=1s，超出本时隙
+  - 更新 backlog_tx = 0 + 0.5 - 1.0 = 不会积压（本时隙完成），重置为0
+
+时隙 t=1:
+  - UAV_1 又有新请求，传输时间 t_tx1 = 0.8s
+  - 上次 backlog_tx = 0（上次完成了）
+  - 等待时间 = max(0 + 0) = 0
+  - 新 backlog_tx = 0 + 0.8 = 0.8s
+```
+
+**高负载场景**（多个请求堆积）：
+
+```
+时隙 t=0: 请求1，tx=0.6s
+  - backlog = 0, wait = 0
+  - 剩余 1.0 - 0.6 = 0.4s （本时隙还有时间）
+
+时隙 t=1: 同时有请求2和请求3
+  - 请求2：tx=0.5s
+    - backlog=0, wait=0
+    - 从0.4s处开始，需要 0.5s，完成于 0.9s，在时隙末
+  - 请求3在请求2之前进入队列
+    - 等待请求2完成
+    - wait = (0 + 0.5) = 0.5s (请求2的传输时间)
+    - tx3 = 0.7s
+    - 完成于 0.5 + 0.7 = 1.2s > tau，溢出到次时隙
+    - new_backlog = 1.2 - 1.0 = 0.2s（待下个时隙继续）
+
+时隙 t=2:
+  - 新请求4：tx=0.3s
+  - backlog = 0.2s (请求3的遗留)
+  - wait = max(0.2 + 0) = 0.2s
+  - 队列：[请求3遗留的0.2s] + [请求4的0.3s] = 0.5s，本时隙完成
+  - new_backlog = 0
+```
+
+##### 2.4.3.3 各链路的排队应用
+
+**Edge Link（OFDMA，不产生排队）：**
+
+- 每个 UE 独用子载波，互不影响
+- 同一 UAV 的多请求并行处理
+- **无排队等待**（`queue_wait = 0`）
+
+**Inter-UAV Link（FDM，协作者侧排队）：**
+
+- 不同请求方用不同频段（频分复用），无相互干扰
+- 同一请求方的多个请求在协作者侧**串行排队**
+- 公式：
+$$
+t_{\text{queue}}^{\text{UAV-UAV}} = \max\left(
+\text{my\_backlog\_tx} + \text{my\_tx}, \text{my\_backlog\_rx} + \text{my\_rx}
+\right)_{\text{self}} + \max(\cdots)_{\text{at\_collaborator}}
+$$
+
+**Backhaul Link（点对点，严格排队）：**
+
+- 上行和下行在独立频段（全双工），但属于同一 UAV
+- 同一 UAV 的多个请求必须串行排队
+- 公式：
+$$
+t_{\text{queue}}^{\text{MBS}} = \max\left(
+\text{backlog\_tx\_mbs} + \text{tx\_time\_mbs}, \text{backlog\_rx\_mbs} + \text{rx\_time\_mbs}
+\right)
+$$
+
+##### 2.4.3.4 最终 UE 延迟的组成
+
+对于 Case 2（协作UAV缓存命中）的完整延迟：
+
+$$
+\text{Latency}_{UE} = \underbrace{t_{\text{req}}(UE \to UAV) + t_{\text{data}}(UAV \to UE)}_{\text{Edge Link}}
++ \underbrace{t_{\text{req}}(UAV \to Collab) + t_{\text{data}}(Collab \to UAV)}_{\text{Inter-UAV Link}}
++ \underbrace{t_{\text{queue}}^{\text{UAV-UAV}}}_{\text{积压等待}}
+$$
+
+其中 `queue_wait` 包含了前续时隙遗留的积压和本时隙新请求的排队。
+
+##### 2.4.3.5 实现细节与代码映射
+
+代码实现在 [uavs.py](environment/uavs.py#L380-L490) 中：
+
+```python
+# 本时隙积压状态（秒）
+self._backlog_tx_uav_mbs: float  # 前一时隙遗留的 MBS 上行发送
+self._backlog_rx_uav_mbs: float  # 前一时隙遗留的 MBS 下行接收
+
+# 本时隙累积的传输时间（用于新请求排队）
+self._tx_time_uav_mbs: float  # 本时隙已累积的 MBS 上行传输时间
+self._rx_time_uav_mbs: float  # 本时隙已累积的 MBS 下行接收时间
+
+# 线路排队等待（包含积压）
+queue_wait_uav_mbs = max(
+    self._backlog_tx_uav_mbs + self._tx_time_uav_mbs,
+    self._backlog_rx_uav_mbs + self._rx_time_uav_mbs
+)
+```
+
+**时隙末更新**（[uavs.py#L580](environment/uavs.py#L580)）：
+
+```python
+# 积压衰减：已过去 1 时隙
+self._backlog_tx_uav_mbs = max(self._backlog_tx_uav_mbs - 1.0, 0.0)
+self._backlog_rx_uav_mbs = max(self._backlog_rx_uav_mbs - 1.0, 0.0)
+
+# 如果本时隙传输未完成，转入下一时隙的积压
+if self._tx_time_uav_mbs > 1.0:
+    self._backlog_tx_uav_mbs += self._tx_time_uav_mbs - 1.0
+if self._rx_time_uav_mbs > 1.0:
+    self._backlog_rx_uav_mbs += self._rx_time_uav_mbs - 1.0
+
+# 重置本时隙累积
+self._tx_time_uav_mbs = 0.0
+self._rx_time_uav_mbs = 0.0
+```
+
+##### 2.4.3.6 与真实系统的对应关系
+
+- **OFDMA 并行处理**：对应实际蜂窝系统中多用户共享 RB（资源块）的调度
+- **FDM 频分复用**：对应 UAV 间的专用频段分配，避免干扰
+- **跨时隙积压**：对应实际网络中的缓冲队列行为 —— 当传输需求超过时隙容量时，剩余请求延到次时隙或更晚处理
+
+---
+
+#### 2.4.4 能耗与时延的权衡
+
+系统在优化过程中需要平衡时延和能耗：
+
+- **短时延链路**：Edge（OFDMA）> Inter-UAV（FDM）> Backhaul（点对点限流）
+- **低能耗**：协作传输（利用缓存）< 直接 MBS 获取（回程功率高，距离远）
+- **MARL 学习目标**：通过合理的 UAV 部署、波束控制、协作选择，找到时延/能耗最优平衡
 
 $$
 t_{\text{queue}} = \max(t_{\text{backlog}}^{\text{tx}} + t_{\text{current}}^{\text{tx}}, t_{\text{backlog}}^{\text{rx}} + t_{\text{current}}^{\text{rx}})
@@ -1138,7 +1331,7 @@ $$
     └── 关联UE数量 (原始计数值，范围 [0, MAX_ASSOCIATED_UES]，默认0~50) ... 1 维
 ```
 
-**说明**：计数字段采用原始整数值（未归一化）。在注意力机制中，这两个字段用于**动态生成 Mask**：将计数值转换为 boolean mask，使注意力机制只关注真实数据而忽略填充。在非注意力模式中，MeanPoolingEncoder在内部会按这些计数做均值池化，有效减轻padding对输入特征的污染。
+**说明**：计数字段采用原始整数值（未归一化）。在注意力机制中，这两个字段用于**动态生成 Mask**：将计数值转换为 boolean mask，使注意力机制只关注真实数据而忽略填充。在当前无注意力实现中，MADDPG 仍通过 `MeanPoolingEncoder` 利用这些计数做均值池化；MAPPO 无注意力分支则直接保留这些原始计数字段作为输入特征的一部分，不再显式做 entity-level 均值池化。
 
 #### 3.1.2 观测特征详解
 
@@ -1243,9 +1436,9 @@ $$
 作为本项目的核心 On-policy 算法基线，针对复杂的 UAV 微调场景解决了多个关键痛点：
 1. **有界动作空间与 Jacobian 校正**：摒弃了易出现越界截断的传统 Normal 采样裁剪方案，环境直接映射 $[-1, 1]$ 有界动作，而在算法层采用 `tanh-squash` 机制并附加 Jacobian 行列式校正。保证了动作采样不越界且 Log Probability 计算的绝对准确。
 2. **Rollout 级别的 Advantage 归一化**：不同于在每个 mini-batch 内重复归一化（易引入高方差），系统利用 Rollout Buffer 的全量视角进行全局 Advantage 归一化，且仅针对 Active 的智能体生效，极大提升了训练稳定性。
-3. **Per-Agent 价值解耦结构**：由于 UAV 环境存在特异性的惩罚（如个体碰撞/边界/邻近惩罚），如果Critic直接采用粗糙的同一全局价值广播会产生目标冲突。实际 Critic 的网络设计保留了单标量输出结构头，但其数据流和 Return 计算完全按照 Per-Agent 样本结构分别展开，实现全局状态评价与个体收益的完美结合。
-4. **双分支实现（Attention / Non-Attention）**：当 `USE_ATTENTION=True` 时，MAPPO 使用 `AttentionActorNetwork + AttentionCriticNetwork + AgentPoolingValue`；当 `USE_ATTENTION=False` 时，使用 `MeanPoolingEncoder` 前端的轻量 MLP 分支。两条分支共享统一 critic 输入契约：`joint_obs + agent_index + active_mask`。
-5. **批量对齐与工程鲁棒性**：训练 mini-batch 采用 `joint_obs + joint_active_mask + joint_obs_index` 去重对齐 `(time, agent)` 扁平样本，Critic 通过 `sample_index` 做上下文映射；模型加载阶段使用 checkpoint metadata 校验与原子回滚，避免 attention/non-attention 配置错配导致的部分加载污染。
+3. **critic 粒度已分化**：当前 MAPPO 的两条 critic 分支不再完全同构。non-attention critic 直接接收 `flat share_obs` 并输出单个标量 `V(s)`，在 rollout 阶段广播为每个 agent 的 baseline；attention critic 则已升级为 per-agent centralized critic，路径为 `share_obs -> per-agent AttentionEncoder -> concat(team_context) -> e_i 条件化调制 -> per-agent values`。因此，attention 分支已经部分缓解了共享团队基线过粗的问题，而 non-attention 分支仍保留较粗粒度的团队 baseline。
+4. **双分支实现（Attention / Non-Attention）**：当 `USE_ATTENTION=True` 时，MAPPO 使用 `AttentionActorNetwork + AttentionCriticNetwork`，其中 attention critic 内部带有 team-context conditioner；当 `USE_ATTENTION=False` 时，普通 actor 直接使用 `raw obs`，普通 critic 直接使用 `flat share_obs`。两条分支共享统一 critic 输入契约：`share_obs` 的形状为 `[batch, num_agents * obs_dim]`，但内部处理路径不同。
+5. **工程鲁棒性与训练统计**：MAPPO 训练路径保留 checkpoint metadata 校验与原子回滚机制，避免 attention/non-attention 配置错配导致的部分加载污染。训练主日志与调试日志拆分为两个 JSONL 文件：环境表现指标写入 `log_data_<timestamp>.json`，训练诊断指标按较低频率写入 `debug_data_<timestamp>.json`。
 
 #### 3.3.3 其他算法模型与通用网络配置
 | 算法             | 类型       | Actor  | Critic    | 核心特点                 |
@@ -1260,10 +1453,12 @@ $$
     - MADDPG/MATD3: `obs_dim → 768 → 768 → action_dim` (确定性策略，直接 tanh 输出)
     - MASAC: `obs_dim → 768 → 768 → (mean, log_std)`（随机策略，重参数采样后 tanh）
   - MAPPO: `obs_dim → 768 → 768 → action_dim (均值) + log_std` (正态分布与 tanh-squash 机制)
-    - *注*：MADDPG 与 MAPPO 在无注意力配置下均使用 `MeanPoolingEncoder` 缓解 padding 对输入语义的污染。
+    - *注*：MADDPG 在无注意力配置下仍使用 `MeanPoolingEncoder` 缓解 padding 对输入语义的污染；MAPPO 无注意力配置已改为直接使用原始 `obs/share_obs`。
 - **Critic 网络结构**：
     - MATD3/MASAC: `(num_agents*obs_dim + num_agents*action_dim) → 768 → 768 → 1`（双 Critic 版本，无残差）
-    - MAPPO: `joint_obs → (MeanPoolingEncoder 或 AttentionEncoder+AgentPoolingValue) → agent-conditioned value head(one_hot(agent_id)) → 1`
+    - MAPPO:
+      - non-attention: `share_obs(flattened joint obs) → scalar value head → 1`
+      - attention: `share_obs(flattened joint obs) → reshape([batch, N, obs_dim]) → per-agent AttentionEncoder → concat(team_context) → e_i-conditioned modulation → shared scalar value head → [N]`
     - MADDPG: `joint_obs + joint_action → (MeanPoolingEncoder 或共享 AttentionEncoder + AgentPoolingAttention) → 768 残差 MLP → 1`
 - **优化器与学习率**：Actor $LR = 1 \times 10^{-4}$，Critic $LR = 2 \times 10^{-4}$，AdamW
 
@@ -1331,6 +1526,56 @@ $$
 └─────────────────────────────────────────────────────────────┘
 ```
 
+### 4.1 训练日志与离线绘图
+
+当前仓库的日志与绘图链路已经过一次明确收缩：环境表现指标保真记录，展示层只做 `raw + EMA`，不再混入误差带或置信区间。
+
+#### 4.1.1 日志文件
+
+训练阶段会在 `train_logs/` 目录下生成三类文件：
+
+| 文件 | 频率 | 内容 |
+|------|------|------|
+| `log_data_<timestamp>.json` | 每个 `episode/update` 一条 | 环境表现指标：`reward / latency / energy / fairness / rate / collisions / boundaries / time` |
+| `debug_data_<timestamp>.json` | 每 `LOG_FREQ` 个 `episode/update` 一条 | 训练诊断指标：如 `actor_loss / critic_loss / entropy / ratio_mean / clip_fraction / log_std_mean / action_std` |
+| `config_<timestamp>.json` | 每次训练一次 | 当次训练使用的配置快照 |
+
+其中：
+
+- `MAPPO` 使用 `update` 作为进度单位；
+- `MADDPG / MATD3 / MASAC / Random` 使用 `episode` 作为进度单位；
+- 自动绘图与 `state_images` 生成频率由 `PLOT_FREQ=50` 控制，不会在每个 step 都触发。
+
+#### 4.1.2 在线绘图与离线绘图
+
+当前绘图逻辑由 `utils/plot_logs.py` 实现，核心规则如下：
+
+1. 单指标图均采用“浅色原始细线 + 深色 EMA 趋势线”。
+2. 不再绘制误差带、标准差阴影或置信区间。
+3. 双 y 轴对比图仍保留，包括：
+   - Reward + Fairness
+   - Latency + Energy
+   - Rate + Fairness
+
+离线绘制单个日志文件：
+
+```bash
+python plot_existing_logs.py train_logs/log_data_YYYY-MM-DD_HH-MM-SS.json --output_dir output_dir --smoothing 0.9
+```
+
+离线绘制多算法对比图：
+
+```bash
+python plot_comparison.py \
+  --files train_logs/log_data_a.json train_logs/log_data_b.json \
+  --labels MAPPO MADDPG \
+  --output comparison_reward.png \
+  --metric reward \
+  --smoothing 0.9
+```
+
+> 注意：多算法对比要求所有输入文件使用相同的 x 轴类型，不能混用 `episode` 与 `update`。
+
 ---
 
 ## 附录：快速启动
@@ -1353,6 +1598,23 @@ python main.py test --num_episodes 100 --model_path <path> --config_path <path>
 python visualize.py
 ```
 
+### 离线绘图
+
+```bash
+python plot_existing_logs.py train_logs/log_data_YYYY-MM-DD_HH-MM-SS.json --output_dir output_dir --smoothing 0.9
+```
+
+### 多算法对比绘图
+
+```bash
+python plot_comparison.py \
+  --files train_logs/log_data_a.json train_logs/log_data_b.json \
+  --labels MAPPO MADDPG \
+  --output comparison_reward.png \
+  --metric reward \
+  --smoothing 0.9
+```
+
 ---
 
-*文档更新：2026年4月2日（已按当前代码实现校准）*
+*文档更新：2026年4月4日（已按当前代码实现重新校准）*

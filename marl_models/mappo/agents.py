@@ -40,16 +40,19 @@ def _reshape_share_obs(share_obs: torch.Tensor, num_agents: int, obs_dim: int) -
 class _GaussianPolicyHead(nn.Module):
     def __init__(self, input_dim: int, action_dim: int) -> None:
         super().__init__()
+        self.input_norm: nn.LayerNorm = nn.LayerNorm(input_dim)
         self.fc1: nn.Linear = layer_init(nn.Linear(input_dim, config.MLP_HIDDEN_DIM))
         self.ln1: nn.LayerNorm = nn.LayerNorm(config.MLP_HIDDEN_DIM)
         self.fc2: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, config.MLP_HIDDEN_DIM))
         self.ln2: nn.LayerNorm = nn.LayerNorm(config.MLP_HIDDEN_DIM)
+        self.activation: nn.SiLU = nn.SiLU()
         self.mean: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, action_dim), std=0.01)
         self.log_std = nn.Parameter(torch.zeros(1, action_dim))
 
     def forward(self, features: torch.Tensor) -> Normal:
-        x: torch.Tensor = F.silu(self.ln1(self.fc1(features)))
-        x = F.silu(self.ln2(self.fc2(x)))
+        x: torch.Tensor = self.input_norm(features)
+        x = self.ln1(self.activation(self.fc1(x)))
+        x = self.ln2(self.activation(self.fc2(x)))
         mean: torch.Tensor = self.mean(x)
         log_std: torch.Tensor = torch.clamp(self.log_std, config.LOG_STD_MIN, config.LOG_STD_MAX)
         std: torch.Tensor = torch.exp(log_std)
@@ -59,22 +62,21 @@ class _GaussianPolicyHead(nn.Module):
 class _ScalarValueHead(nn.Module):
     def __init__(self, context_dim: int) -> None:
         super().__init__()
+        self.input_norm: nn.LayerNorm = nn.LayerNorm(context_dim)
         self.fc1: nn.Linear = layer_init(nn.Linear(context_dim, config.MLP_HIDDEN_DIM))
         self.ln1: nn.LayerNorm = nn.LayerNorm(config.MLP_HIDDEN_DIM)
         self.fc2: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, config.MLP_HIDDEN_DIM))
         self.ln2: nn.LayerNorm = nn.LayerNorm(config.MLP_HIDDEN_DIM)
         self.fc3: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, config.MLP_HIDDEN_DIM))
         self.ln3: nn.LayerNorm = nn.LayerNorm(config.MLP_HIDDEN_DIM)
-        self.out: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, 1))
+        self.activation: nn.SiLU = nn.SiLU()
+        self.out: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, 1), std=1.0)
 
     def forward(self, context: torch.Tensor) -> torch.Tensor:
-        x: torch.Tensor = F.silu(self.ln1(self.fc1(context)))
-        residual = x
-        x = F.silu(self.ln2(self.fc2(x)))
-        x = x + residual
-        residual = x
-        x = F.silu(self.ln3(self.fc3(x)))
-        x = x + residual
+        x: torch.Tensor = self.input_norm(context)
+        x = self.ln1(self.activation(self.fc1(x)))
+        x = self.ln2(self.activation(self.fc2(x)))
+        x = self.ln3(self.activation(self.fc3(x)))
         return self.out(x).squeeze(-1)
 
 

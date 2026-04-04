@@ -2,6 +2,7 @@ import copy
 
 from marl_models.base_model import MARLModel
 from marl_models.mappo.agents import ActorNetwork, AttentionActorNetwork, AttentionCriticNetwork, CriticNetwork
+from marl_models.mappo.value_norm import ValueNorm
 from marl_models.buffer_and_helpers import masked_mean
 import config
 import numpy as np
@@ -35,6 +36,7 @@ class MAPPO(MARLModel):
         self.critic_optimizer: torch.optim.AdamW = torch.optim.AdamW(self.critics.parameters(), lr=config.CRITIC_LR)
         self.entropy_coef: float = config.PPO_ENTROPY_COEF_START
         self.entropy_mc_samples: int = config.PPO_ENTROPY_MC_SAMPLES
+        self.value_normalizer = ValueNorm(1, device=device)
 
     def _checkpoint_metadata(self) -> dict[str, object]:
         return {
@@ -69,17 +71,23 @@ class MAPPO(MARLModel):
         self,
         actor_state: dict[str, torch.Tensor],
         critic_state: dict[str, torch.Tensor],
+        value_normalizer_state: dict[str, torch.Tensor] | None = None,
     ) -> None:
         actor_backup = copy.deepcopy(self.actors.state_dict())
         critic_backup = copy.deepcopy(self.critics.state_dict())
+        value_norm_backup = copy.deepcopy(self.value_normalizer.state_dict())
         failing_component = "actor"
         try:
             self.actors.load_state_dict(actor_state)
             failing_component = "critic"
             self.critics.load_state_dict(critic_state)
+            if value_normalizer_state is not None:
+                failing_component = "value_normalizer"
+                self.value_normalizer.load_state_dict(value_normalizer_state)
         except RuntimeError as exc:
             self.actors.load_state_dict(actor_backup)
             self.critics.load_state_dict(critic_backup)
+            self.value_normalizer.load_state_dict(value_norm_backup)
             error_text = str(exc)
             compatibility_markers = (
                 "size mismatch",
@@ -94,6 +102,7 @@ class MAPPO(MARLModel):
         except Exception:
             self.actors.load_state_dict(actor_backup)
             self.critics.load_state_dict(critic_backup)
+            self.value_normalizer.load_state_dict(value_norm_backup)
             raise
 
     def _get_active_mask(self, obs: np.ndarray) -> torch.Tensor:
@@ -169,7 +178,7 @@ class MAPPO(MARLModel):
             env_actions, log_probs = self._squashed_log_prob_from_raw_actions(dist, raw_actions)
             env_actions = env_actions * action_mask
             critic_output: torch.Tensor = self.critics(share_obs)
-            values: torch.Tensor = self._critic_values_for_rollout(critic_output)
+            values = self._critic_values_for_rollout(critic_output)
 
         return (
             env_actions.cpu().numpy(),
@@ -265,8 +274,12 @@ class MAPPO(MARLModel):
         critic_output: torch.Tensor = self.critics(share_obs_batch)
         values: torch.Tensor = self._critic_values_for_batch(critic_output, agent_index_batch)
         values_clipped: torch.Tensor = old_values_batch + torch.clamp(values - old_values_batch, -config.PPO_VALUE_CLIP_EPS, config.PPO_VALUE_CLIP_EPS)
-        vf_loss1: torch.Tensor = (values - returns_batch).pow(2)
-        vf_loss2: torch.Tensor = (values_clipped - returns_batch).pow(2)
+        active_indices = actor_mask > 0.5
+        if active_indices.any():
+            self.value_normalizer.update(returns_batch[active_indices].detach())
+        normalized_returns = self.value_normalizer.normalize(returns_batch.detach())
+        vf_loss1: torch.Tensor = (values - normalized_returns).pow(2)
+        vf_loss2: torch.Tensor = (values_clipped - normalized_returns).pow(2)
         critic_loss: torch.Tensor = config.PPO_VALUE_LOSS_COEF * masked_mean(torch.max(vf_loss1, vf_loss2), actor_mask)
 
         # Actor update
@@ -301,7 +314,11 @@ class MAPPO(MARLModel):
         if total_updates <= 0:
             raise ValueError("total_updates must be positive")
 
-        rollout_buffer.compute_returns_and_advantages(config.DISCOUNT_FACTOR, config.PPO_GAE_LAMBDA)
+        rollout_buffer.compute_returns_and_advantages(
+            config.DISCOUNT_FACTOR,
+            config.PPO_GAE_LAMBDA,
+            value_normalizer=self.value_normalizer,
+        )
         rollout_buffer.normalize_advantages()
         self.entropy_coef = self._compute_entropy_coef(current_update=current_update, total_updates=total_updates)
 
@@ -334,6 +351,7 @@ class MAPPO(MARLModel):
                 "metadata": self._checkpoint_metadata(),
                 "actor": self.actors.state_dict(),
                 "critic": self.critics.state_dict(),
+                "value_normalizer": self.value_normalizer.state_dict(),
             },
             os.path.join(directory, "mappo.pth"),
         )
@@ -346,4 +364,8 @@ class MAPPO(MARLModel):
         if "actor" not in checkpoint or "critic" not in checkpoint:
             raise ValueError("MAPPO checkpoint must contain both actor and critic state_dict entries")
         self._validate_checkpoint_metadata(checkpoint.get("metadata"))
-        self._load_checkpoint_state_atomically(checkpoint["actor"], checkpoint["critic"])
+        self._load_checkpoint_state_atomically(
+            checkpoint["actor"],
+            checkpoint["critic"],
+            checkpoint.get("value_normalizer"),
+        )
