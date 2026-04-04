@@ -6,8 +6,6 @@ from torch.distributions import Normal
 
 import config
 from marl_models.attention import AttentionEncoder
-from marl_models.attention import AgentPoolingValue
-from marl_models.attention import MeanPoolingEncoder
 
 # Added layer normalization and orthogonal initialization for better training stability
 
@@ -34,26 +32,9 @@ def _validate_attention_obs_dim(obs_dim: int) -> None:
         )
 
 
-def _masked_mean(tokens: torch.Tensor, active_mask: torch.Tensor) -> torch.Tensor:
-    if active_mask.shape[:2] != tokens.shape[:2]:
-        raise ValueError(
-            f"Expected active_mask leading shape {tuple(tokens.shape[:2])}, got {tuple(active_mask.shape)}"
-        )
-    if active_mask.dtype != torch.bool:
-        raise TypeError(f"active_mask must use dtype torch.bool, got {active_mask.dtype}")
-
-    weights = active_mask.unsqueeze(-1).to(dtype=tokens.dtype)
-    denom = weights.sum(dim=1).clamp_min(1.0)
-    return (tokens * weights).sum(dim=1) / denom
-
-
 def _reshape_share_obs(share_obs: torch.Tensor, num_agents: int, obs_dim: int) -> torch.Tensor:
     _validate_share_obs(share_obs, num_agents, obs_dim)
     return share_obs.reshape(share_obs.shape[0], num_agents, obs_dim)
-
-
-def _active_mask_from_joint_obs(joint_obs: torch.Tensor) -> torch.Tensor:
-    return joint_obs[:, :, config.OWN_STATE_DIM - 1] >= 0.5
 
 
 class _GaussianPolicyHead(nn.Module):
@@ -87,8 +68,7 @@ class _ScalarValueHead(nn.Module):
         self.out: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, 1))
 
     def forward(self, context: torch.Tensor) -> torch.Tensor:
-        x: torch.Tensor = context
-        x = F.silu(self.ln1(self.fc1(x)))
+        x: torch.Tensor = F.silu(self.ln1(self.fc1(context)))
         residual = x
         x = F.silu(self.ln2(self.fc2(x)))
         x = x + residual
@@ -98,15 +78,26 @@ class _ScalarValueHead(nn.Module):
         return self.out(x).squeeze(-1)
 
 
+class _TeamContextConditioner(nn.Module):
+    def __init__(self, agent_dim: int, context_dim: int) -> None:
+        super().__init__()
+        self.fc1: nn.Linear = layer_init(nn.Linear(agent_dim, config.MLP_HIDDEN_DIM))
+        self.fc2: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, context_dim * 2), std=0.01)
+
+    def forward(self, agent_features: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        conditioned = F.silu(self.fc1(agent_features))
+        gamma_beta = self.fc2(conditioned)
+        gamma, beta = gamma_beta.chunk(2, dim=-1)
+        return torch.tanh(gamma), beta
+
+
 class ActorNetwork(nn.Module):
     def __init__(self, obs_dim: int, action_dim: int) -> None:
-        super(ActorNetwork, self).__init__()
-        self.encoder = MeanPoolingEncoder()
-        self.policy = _GaussianPolicyHead(self.encoder.output_dim, action_dim)
+        super().__init__()
+        self.policy = _GaussianPolicyHead(obs_dim, action_dim)
 
     def forward(self, obs: torch.Tensor) -> Normal:
-        encoded = self.encoder(obs)
-        return self.policy(encoded)
+        return self.policy(obs)
 
 
 class AttentionActorNetwork(nn.Module):
@@ -123,20 +114,15 @@ class AttentionActorNetwork(nn.Module):
 
 class CriticNetwork(nn.Module):
     def __init__(self, num_agents: int, obs_dim: int) -> None:
-        super(CriticNetwork, self).__init__()
+        super().__init__()
         self.num_agents = num_agents
         self.obs_dim = obs_dim
-        self.encoder = MeanPoolingEncoder()
-        self.value_head = _ScalarValueHead(self.encoder.output_dim)
+        self.share_obs_dim = num_agents * obs_dim
+        self.value_head = _ScalarValueHead(self.share_obs_dim)
 
     def forward(self, share_obs: torch.Tensor) -> torch.Tensor:
-        joint_obs = _reshape_share_obs(share_obs, self.num_agents, self.obs_dim)
-        batch_size = joint_obs.shape[0]
-        encoded = self.encoder(joint_obs.reshape(batch_size * self.num_agents, self.obs_dim))
-        encoded = encoded.view(batch_size, self.num_agents, -1)
-        active_mask = _active_mask_from_joint_obs(joint_obs)
-        context = _masked_mean(encoded, active_mask)
-        return self.value_head(context)
+        _validate_share_obs(share_obs, self.num_agents, self.obs_dim)
+        return self.value_head(share_obs)
 
 
 class AttentionCriticNetwork(nn.Module):
@@ -146,14 +132,22 @@ class AttentionCriticNetwork(nn.Module):
         self.num_agents = num_agents
         self.obs_dim = obs_dim
         self.encoder = AttentionEncoder()
-        self.agent_pooling = AgentPoolingValue(encoder_dim=self.encoder.output_dim)
-        self.value_head = _ScalarValueHead(self.encoder.output_dim)
+        self.encoded_share_obs_dim = num_agents * self.encoder.output_dim
+        self.context_norm: nn.LayerNorm = nn.LayerNorm(self.encoded_share_obs_dim)
+        self.conditioner = _TeamContextConditioner(
+            agent_dim=self.encoder.output_dim,
+            context_dim=self.encoded_share_obs_dim,
+        )
+        self.value_head = _ScalarValueHead(self.encoded_share_obs_dim)
 
     def forward(self, share_obs: torch.Tensor) -> torch.Tensor:
         joint_obs = _reshape_share_obs(share_obs, self.num_agents, self.obs_dim)
         batch_size = joint_obs.shape[0]
         encoded = self.encoder(joint_obs.reshape(batch_size * self.num_agents, self.obs_dim))
-        encoded = encoded.view(batch_size, self.num_agents, -1)
-        active_mask = _active_mask_from_joint_obs(joint_obs)
-        context = self.agent_pooling(encoded, active_mask)
-        return self.value_head(context)
+        agent_encodings = encoded.reshape(batch_size, self.num_agents, self.encoder.output_dim)
+        team_context = agent_encodings.reshape(batch_size, self.encoded_share_obs_dim)
+        normalized_context = self.context_norm(team_context).unsqueeze(1).expand(-1, self.num_agents, -1)
+        gamma, beta = self.conditioner(agent_encodings)
+        modulated_context = (1.0 + gamma) * normalized_context + beta
+        per_agent_values = self.value_head(modulated_context.reshape(batch_size * self.num_agents, self.encoded_share_obs_dim))
+        return per_agent_values.reshape(batch_size, self.num_agents)

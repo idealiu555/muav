@@ -336,7 +336,7 @@ def generate_plots(
         smoothing=smoothing
     )
     
-    print(f"✅ Academic-style plots saved to {output_dir}\n")
+    print(f"✅ Plots saved to {output_dir}\n")
 
 
 def generate_plots_if_available(

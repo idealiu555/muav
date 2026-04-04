@@ -141,6 +141,7 @@ class MAPPORolloutBuffer:
         returns_flat = self.returns[:num_steps].reshape(num_samples)
         values_flat = self.values[:num_steps].reshape(num_samples)
         active_masks_flat = self.active_masks[:num_steps].reshape(num_samples)
+        agent_indices_flat = torch.arange(self.num_agents, device=self.storage_device).repeat(num_steps)
         permuted_indices = torch.randperm(num_samples, device=self.storage_device)
 
         for start in range(0, num_samples, batch_size):
@@ -154,6 +155,7 @@ class MAPPORolloutBuffer:
                 "returns": self._to_train_device(returns_flat[batch_indices]),
                 "old_values": self._to_train_device(values_flat[batch_indices]),
                 "active_mask": self._to_train_device(active_masks_flat[batch_indices]),
+                "agent_index": self._to_train_device(agent_indices_flat[batch_indices]),
             }
 
     def clear(self) -> None:
