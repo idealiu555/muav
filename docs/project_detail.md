@@ -1,6 +1,6 @@
 # 多无人机空中基站通信保障系统 —— 技术详解文档
 
-> 状态说明（2026-04-04 校准）：本文档已根据当前仓库实现重新核对。特别是 MAPPO 的 critic 语义、训练日志格式、离线绘图链路与 attention/non-attention 分支说明，均已对齐当前代码，而非历史版本。
+> 状态说明（2026-04-06 校准）：本文档已根据当前仓库实现重新核对。特别是 MADDPG 标准化后的单一路径实现、MAPPO attention 独占状态、以及 critic 输入/上下文拼接细节，均已对齐当前代码。
 
 ## 目录
 
@@ -1331,7 +1331,7 @@ $$
     └── 关联UE数量 (原始计数值，范围 [0, MAX_ASSOCIATED_UES]，默认0~50) ... 1 维
 ```
 
-**说明**：计数字段采用原始整数值（未归一化）。在注意力机制中，这两个字段用于**动态生成 Mask**：将计数值转换为 boolean mask，使注意力机制只关注真实数据而忽略填充。在当前无注意力实现中，MADDPG 仍通过 `MeanPoolingEncoder` 利用这些计数做均值池化；MAPPO 无注意力分支则直接保留这些原始计数字段作为输入特征的一部分，不再显式做 entity-level 均值池化。
+**说明**：计数字段采用原始整数值（未归一化）。在当前代码中，这两个字段主要服务于 **MAPPO attention** 路径：用于动态生成 boolean mask，使 `AttentionEncoder` 只关注真实邻居/UE 而忽略 padding。MADDPG 已不再经过额外的 entity encoder 或 pooling 模块，而是直接消费原始局部观测。
 
 #### 3.1.2 观测特征详解
 
@@ -1362,7 +1362,7 @@ $$
 | 缓存命中标志  | 1    | {0, 1} | 本 UAV 是否缓存该请求文件                            |
 
 **（4）实体计数（2 维）**
-分别提供有效关联到的观测邻居及关联UE数量（原始计数，未在环境侧归一化）。注意力分支直接据此构建 mask；无注意力的 MADDPG 均值池化编码器内部会再按最大值归一化这两个计数特征。
+分别提供有效关联到的观测邻居及关联UE数量（原始计数，未在环境侧归一化）。当前只有 MAPPO 的 attention 分支会直接据此构建 mask；其余分支将这两个计数字段作为普通观测特征保留在输入中。
 
 ### 3.2 动作空间
 
@@ -1427,10 +1427,10 @@ $$
 本项目采用 CTDE（集中式训练，分布式执行）架构，支持多种前沿的多智能体强化学习算法，下面重点介绍其核心算法的实现特点：
 
 #### 3.3.1 MADDPG (多智能体深度确定性策略梯度)
-作为本项目的核心 Off-policy 算法基线，其经历了深度定制：
-1. **注意力协同架构（Attention Mechanism）**：通过可配置的 `USE_ATTENTION`，MADDPG 和 MAPPO 现已支持基于 Cross-Attention 的状态编码器，以处理可变长度的 UE 列表和邻居状态。
-2. **共享编码器与置换不变性**：在 Attention 模式下，多个 Agent 的 Critic 网络共享底层的注意力特征提取器以提升样本效率。其 `AgentPoolingAttention` 模块实现了真正的置换不变（Permutation-Invariant）聚合，使 Critic 能稳定且可扩展地评估全局状态。
-3. **掩码控制（Active / Bootstrap Masking）**：深度集成了防失效智能体干扰机制，屏蔽发生崩溃出界截断的 Agent，并在目标 Critic 评估时使用精准的 next-step Bootstrap 掩码。
+作为本项目的核心 Off-policy 算法基线，当前版本已经回归为单一路径的标准 centralized-critic MADDPG：
+1. **标准 MLP Actor/Critic**：Actor 直接接收单个 UAV 的原始局部观测 `obs_i`，Critic 直接接收 flatten 后的 `joint_obs + joint_action`，不再经过额外的 attention encoder、mean pooling 或 permutation-invariant agent pooling。
+2. **保留工程化稳定性增强**：虽然结构上回到了标准 MADDPG，本实现仍保留 `LayerNorm`、正交初始化、`AdamW`、梯度裁剪等工程细节，用于提升训练稳定性。
+3. **掩码控制（Active / Bootstrap Masking）**：训练阶段仍保留 `active_mask` 与 `bootstrap_mask`，用于屏蔽失效 UAV 的 actor/critic 更新，并在目标 Q 计算时控制 bootstrap。
 
 #### 3.3.2 MAPPO (多智能体近端策略优化)
 作为本项目的核心 On-policy 算法基线，针对复杂的 UAV 微调场景解决了多个关键痛点：
@@ -1453,13 +1453,13 @@ $$
     - MADDPG/MATD3: `obs_dim → 768 → 768 → action_dim` (确定性策略，直接 tanh 输出)
     - MASAC: `obs_dim → 768 → 768 → (mean, log_std)`（随机策略，重参数采样后 tanh）
   - MAPPO: `obs_dim → 768 → 768 → action_dim (均值) + log_std` (正态分布与 tanh-squash 机制)
-    - *注*：MADDPG 在无注意力配置下仍使用 `MeanPoolingEncoder` 缓解 padding 对输入语义的污染；MAPPO 无注意力配置已改为直接使用原始 `obs/share_obs`。
+    - *注*：MADDPG 与 MAPPO 的无 attention 分支当前都直接使用原始 `obs/share_obs`；只有 MAPPO 的 attention 分支会先经过 `AttentionEncoder`。
 - **Critic 网络结构**：
     - MATD3/MASAC: `(num_agents*obs_dim + num_agents*action_dim) → 768 → 768 → 1`（双 Critic 版本，无残差）
     - MAPPO:
       - non-attention: `share_obs(flattened joint obs) → scalar value head → 1`
       - attention: `share_obs(flattened joint obs) → reshape([batch, N, obs_dim]) → per-agent AttentionEncoder → concat(team_context, e_i) → shared scalar value head → [N]`
-    - MADDPG: `joint_obs + joint_action → (MeanPoolingEncoder 或共享 AttentionEncoder + AgentPoolingAttention) → 768 残差 MLP → 1`
+    - MADDPG: `joint_obs + joint_action → 768 → 768 → 1`
 - **优化器与学习率**：Actor $LR = 1 \times 10^{-4}$，Critic $LR = 2 \times 10^{-4}$，AdamW
 
 | 通用超参数         | 值 | 说明 |

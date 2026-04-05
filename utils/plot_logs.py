@@ -42,8 +42,8 @@ ACADEMIC_STYLE = {
 
 # 学术配色方案 (colorblind-friendly)
 COLORS = {
-    'primary': '#2E86AB',      # 深蓝
-    'secondary': '#A23B72',    # 紫红
+    'primary': '#3580b8',      # 深蓝
+    'secondary': '#dd6969',    # 淡红
     'tertiary': '#F18F01',     # 橙色
     'quaternary': '#C73E1D',   # 红色
     'success': '#3A7D44',      # 绿色

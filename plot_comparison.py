@@ -1,8 +1,10 @@
 # python plot_comparison.py \
-#     --files train_logs/log_data_2025-10-20_10-11-10.json train_logs/log_data_2025-10-20_10-26-03.json \
-#     --labels "MADDPG" "MATD3" \
+#     --files train_logs/amappo.json train_logs/mappo.json \
+#     --labels "AMAPPO" "MAPPO" \
 #     --output comparison_reward.png \
 #     --metric reward
+
+# python plot_comparison.py --files train_logs/amappo.json train_logs/mappo.json --labels "AMAPPO" "MAPPO" --output comparison_reward.png --metric reward
 
 import argparse
 import json
@@ -64,7 +66,7 @@ def plot_algorithm_comparison(
 
     # 指标配置
     metric_config = {
-        "reward": "Average Team Reward (per step)",
+        "reward": "Average Reward",
         "latency": "Average Latency (s)",
         "energy": "Average Energy Consumption (J)",
         "fairness": "Jain's Fairness Index",
@@ -178,7 +180,7 @@ def plot_algorithm_comparison(
     # 开始绘图
     with plt.style.context('seaborn-v0_8-whitegrid'):
         plt.rcParams.update(ACADEMIC_STYLE)
-        fig, ax = plt.subplots(figsize=(10, 6))
+        fig, ax = plt.subplots(figsize=(8, 6))
         
         colors = list(COLORS.values()) # 使用预定义颜色
         
@@ -195,7 +197,7 @@ def plot_algorithm_comparison(
                 smoothed_y = smooth_curve(np.array(y), smoothing)
                 ax.plot(x, smoothed_y, label=label, color=color, linewidth=2.5)
                 # 绘制原始数据的浅色背景（可选，为了清晰度这里只画平滑线，或者可以画非常淡的）
-                ax.plot(x, y, color=color, alpha=0.1, linewidth=1) 
+                ax.plot(x, y, color=color, alpha=0.5, linewidth=1) 
             else:
                 ax.plot(x, y, label=label, color=color, linewidth=2.5)
                 
@@ -227,7 +229,7 @@ if __name__ == "__main__":
     parser.add_argument("--labels", nargs='+', required=True, help="对应的算法标签列表 (空格分隔，数量必须与文件一致)")
     parser.add_argument("--output", type=str, default="comparison_plot.png", help="输出图片路径")
     parser.add_argument("--metric", type=str, default="reward", choices=["reward", "latency", "energy", "fairness", "rate"], help="要对比的指标")
-    parser.add_argument("--smoothing", type=float, default=0.95, help="平滑系数")
+    parser.add_argument("--smoothing", type=float, default=0.90, help="平滑系数")
 
     args = parser.parse_args()
     
