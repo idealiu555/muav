@@ -87,9 +87,11 @@ def test_attention_critic_outputs_one_value_per_agent_sample() -> None:
     values = critic(share_obs)
 
     assert not hasattr(critic, "agent_pooling")
-    assert critic.value_head.fc1.in_features == config.NUM_UAVS * critic.encoder.output_dim
+    assert critic.value_head.fc1.in_features == (
+        config.NUM_UAVS * critic.encoder.output_dim + critic.encoder.output_dim
+    )
     assert hasattr(critic, "context_norm")
-    assert hasattr(critic, "conditioner")
+    assert not hasattr(critic, "conditioner")
     assert tuple(values.shape) == (2, config.NUM_UAVS)
 
 

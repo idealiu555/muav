@@ -1436,8 +1436,8 @@ $$
 作为本项目的核心 On-policy 算法基线，针对复杂的 UAV 微调场景解决了多个关键痛点：
 1. **有界动作空间与 Jacobian 校正**：摒弃了易出现越界截断的传统 Normal 采样裁剪方案，环境直接映射 $[-1, 1]$ 有界动作，而在算法层采用 `tanh-squash` 机制并附加 Jacobian 行列式校正。保证了动作采样不越界且 Log Probability 计算的绝对准确。
 2. **Rollout 级别的 Advantage 归一化**：不同于在每个 mini-batch 内重复归一化（易引入高方差），系统利用 Rollout Buffer 的全量视角进行全局 Advantage 归一化，且仅针对 Active 的智能体生效，极大提升了训练稳定性。
-3. **critic 粒度已分化**：当前 MAPPO 的两条 critic 分支不再完全同构。non-attention critic 直接接收 `flat share_obs` 并输出单个标量 `V(s)`，在 rollout 阶段广播为每个 agent 的 baseline；attention critic 则已升级为 per-agent centralized critic，路径为 `share_obs -> per-agent AttentionEncoder -> concat(team_context) -> e_i 条件化调制 -> per-agent values`。因此，attention 分支已经部分缓解了共享团队基线过粗的问题，而 non-attention 分支仍保留较粗粒度的团队 baseline。
-4. **双分支实现（Attention / Non-Attention）**：当 `USE_ATTENTION=True` 时，MAPPO 使用 `AttentionActorNetwork + AttentionCriticNetwork`，其中 attention critic 内部带有 team-context conditioner；当 `USE_ATTENTION=False` 时，普通 actor 直接使用 `raw obs`，普通 critic 直接使用 `flat share_obs`。两条分支共享统一 critic 输入契约：`share_obs` 的形状为 `[batch, num_agents * obs_dim]`，但内部处理路径不同。
+3. **critic 粒度已分化**：当前 MAPPO 的两条 critic 分支不再完全同构。non-attention critic 直接接收 `flat share_obs` 并输出单个标量 `V(s)`，在 rollout 阶段广播为每个 agent 的 baseline；attention critic 则已升级为 per-agent centralized critic，路径为 `share_obs -> per-agent AttentionEncoder -> concat(team_context, e_i) -> per-agent values`。因此，attention 分支已经部分缓解了共享团队基线过粗的问题，而 non-attention 分支仍保留较粗粒度的团队 baseline。
+4. **双分支实现（Attention / Non-Attention）**：当 `USE_ATTENTION=True` 时，MAPPO 使用 `AttentionActorNetwork + AttentionCriticNetwork`，其中 attention critic 使用 `team_context + e_i` 的简单条件化；当 `USE_ATTENTION=False` 时，普通 actor 直接使用 `raw obs`，普通 critic 直接使用 `flat share_obs`。两条分支共享统一 critic 输入契约：`share_obs` 的形状为 `[batch, num_agents * obs_dim]`，但内部处理路径不同。
 5. **工程鲁棒性与训练统计**：MAPPO 训练路径保留 checkpoint metadata 校验与原子回滚机制，避免 attention/non-attention 配置错配导致的部分加载污染。训练主日志与调试日志拆分为两个 JSONL 文件：环境表现指标写入 `log_data_<timestamp>.json`，训练诊断指标按较低频率写入 `debug_data_<timestamp>.json`。
 
 #### 3.3.3 其他算法模型与通用网络配置
@@ -1458,7 +1458,7 @@ $$
     - MATD3/MASAC: `(num_agents*obs_dim + num_agents*action_dim) → 768 → 768 → 1`（双 Critic 版本，无残差）
     - MAPPO:
       - non-attention: `share_obs(flattened joint obs) → scalar value head → 1`
-      - attention: `share_obs(flattened joint obs) → reshape([batch, N, obs_dim]) → per-agent AttentionEncoder → concat(team_context) → e_i-conditioned modulation → shared scalar value head → [N]`
+      - attention: `share_obs(flattened joint obs) → reshape([batch, N, obs_dim]) → per-agent AttentionEncoder → concat(team_context, e_i) → shared scalar value head → [N]`
     - MADDPG: `joint_obs + joint_action → (MeanPoolingEncoder 或共享 AttentionEncoder + AgentPoolingAttention) → 768 残差 MLP → 1`
 - **优化器与学习率**：Actor $LR = 1 \times 10^{-4}$，Critic $LR = 2 \times 10^{-4}$，AdamW
 

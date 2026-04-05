@@ -1,7 +1,6 @@
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.distributions import Normal
 
 import config
@@ -80,19 +79,6 @@ class _ScalarValueHead(nn.Module):
         return self.out(x).squeeze(-1)
 
 
-class _TeamContextConditioner(nn.Module):
-    def __init__(self, agent_dim: int, context_dim: int) -> None:
-        super().__init__()
-        self.fc1: nn.Linear = layer_init(nn.Linear(agent_dim, config.MLP_HIDDEN_DIM))
-        self.fc2: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, context_dim * 2), std=0.01)
-
-    def forward(self, agent_features: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        conditioned = F.silu(self.fc1(agent_features))
-        gamma_beta = self.fc2(conditioned)
-        gamma, beta = gamma_beta.chunk(2, dim=-1)
-        return torch.tanh(gamma), beta
-
-
 class ActorNetwork(nn.Module):
     def __init__(self, obs_dim: int, action_dim: int) -> None:
         super().__init__()
@@ -135,12 +121,9 @@ class AttentionCriticNetwork(nn.Module):
         self.obs_dim = obs_dim
         self.encoder = AttentionEncoder()
         self.encoded_share_obs_dim = num_agents * self.encoder.output_dim
+        self.critic_input_dim = self.encoded_share_obs_dim + self.encoder.output_dim
         self.context_norm: nn.LayerNorm = nn.LayerNorm(self.encoded_share_obs_dim)
-        self.conditioner = _TeamContextConditioner(
-            agent_dim=self.encoder.output_dim,
-            context_dim=self.encoded_share_obs_dim,
-        )
-        self.value_head = _ScalarValueHead(self.encoded_share_obs_dim)
+        self.value_head = _ScalarValueHead(self.critic_input_dim)
 
     def forward(self, share_obs: torch.Tensor) -> torch.Tensor:
         joint_obs = _reshape_share_obs(share_obs, self.num_agents, self.obs_dim)
@@ -149,7 +132,8 @@ class AttentionCriticNetwork(nn.Module):
         agent_encodings = encoded.reshape(batch_size, self.num_agents, self.encoder.output_dim)
         team_context = agent_encodings.reshape(batch_size, self.encoded_share_obs_dim)
         normalized_context = self.context_norm(team_context).unsqueeze(1).expand(-1, self.num_agents, -1)
-        gamma, beta = self.conditioner(agent_encodings)
-        modulated_context = (1.0 + gamma) * normalized_context + beta
-        per_agent_values = self.value_head(modulated_context.reshape(batch_size * self.num_agents, self.encoded_share_obs_dim))
+        critic_inputs = torch.cat([normalized_context, agent_encodings], dim=-1)
+        per_agent_values = self.value_head(
+            critic_inputs.reshape(batch_size * self.num_agents, self.critic_input_dim)
+        )
         return per_agent_values.reshape(batch_size, self.num_agents)

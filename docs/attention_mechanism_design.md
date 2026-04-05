@@ -1,6 +1,6 @@
 # 注意力机制设计方案
 
-> 状态说明（2026-04-04 更新）：本文档已按当前代码实现重新校准。Attention 机制现已在 MADDPG 与 MAPPO 中落地，MATD3/MASAC 仍为无 attention 分支。特别是 MAPPO attention critic 的实现已更新为当前真实版本：`share_obs -> per-agent AttentionEncoder -> concat(team_context) -> e_i 条件化调制 -> per-agent values`，不再使用历史版本中的 `AgentPoolingValue` 聚合路径。
+> 状态说明（2026-04-05 更新）：本文档已按当前代码实现重新校准。Attention 机制现已在 MADDPG 与 MAPPO 中落地，MATD3/MASAC 仍为无 attention 分支。特别是 MAPPO attention critic 的实现已更新为当前真实版本：`share_obs -> per-agent AttentionEncoder -> team_context + e_i concat -> per-agent values`，不再使用历史版本中的 `AgentPoolingValue` 聚合路径。
 
 ## 1. 问题背景
 
@@ -364,13 +364,9 @@ share_obs [batch, N*380]
   → concat([e_1, ..., e_N]) → team_context [batch, N*256]
   → LayerNorm(team_context) → [batch, N*256]
   → expand 到每个 agent 一份上下文 → [batch, N, N*256]
-  → _TeamContextConditioner(e_i):
-      Linear(256, 768) → SiLU()
-      Linear(768, 2 * N * 256)
-      split → gamma_i, beta_i [batch, N, N*256]
-  → modulated_context_i = (1 + gamma_i) * norm(team_context) + beta_i
+  → concat(norm(team_context), e_i) → critic_input_i [batch, N, N*256 + 256]
   → 共享 _ScalarValueHead（对每个 agent-conditioned context 独立求值）:
-      Linear(N*256, 768) → LayerNorm → SiLU()
+      Linear(N*256 + 256, 768) → LayerNorm → SiLU()
       Linear(768, 768) → LayerNorm → SiLU() + Residual
       Linear(768, 768) → LayerNorm → SiLU() + Residual
       Linear(768, 1)
@@ -380,7 +376,7 @@ share_obs [batch, N*380]
 **特点（与旧版本 AgentPoolingValue 的区别）：**
 
 - **Value 语义**：输出 `[batch, N]` 代表 `V(s, agent_i)` —— 即在给定全局状态下，特定 agent 的价值估计
-- **设计意图**：环境中 agent 的 reward 存在差异化（如碰撞惩罚、边界惩罚、能耗等因 UAV 位置/活跃状态而异，详见 [mappo_pitfalls.md](/memories/repo/mappo_pitfalls.md)），单一全局 V(s) 无法准确估计所有 agent 的价值目标。通过条件化调制使同一个 value head 能够对不同 agent 产生差异化的输出
+- **设计意图**：环境中 agent 的 reward 存在差异化（如碰撞惩罚、边界惩罚等因 UAV 位置/活跃状态而异），单一全局 V(s) 无法准确估计所有 agent 的价值目标。通过在同一 team context 上拼接 `e_i`，同一个 value head 可以输出 agent-specific 的 value
 - **与官方 MAPPO 的主要区别**：
   - 官方 MAPPO 通常是单一 V(s)，由学习共享价值；本实现是 per-agent 中心价值 V(s, agent_id)
   - 官方通常采用全局奖励，本仓库采用 per-agent 奖励（差异化的碰撞、能耗、延迟奖励）
@@ -388,15 +384,15 @@ share_obs [batch, N*380]
 
 **关键实现细节：**
 - `team_context` 由全部 `e_i` flatten/concat 构成，维度 = N*256
-- 每个 agent 通过各自的 conditioner 生成独立的 gamma/beta，实现条件化调制
-- _ScalarValueHead 在每个 agent 的 modulated_context 上独立评估，输出 N 个标量值
+- 每个 agent 共享同一个 `team_context`，再拼接自己的 `e_i` 作为查询身份信息
+- _ScalarValueHead 在每个 agent 的 concat 输入上独立评估，输出 N 个标量值
 - 在双重对齐中，rollout 阶段收集的 `value` 是 `[agent_0_value, agent_1_value, ..., agent_N_value]`；训练时通过 `agent_index` 从 per-agent output 中选出该 agent 的 value 进行 loss 计算
 
 ## 9. AgentPoolingValue 模块说明（历史模块）
 
 ### 设计与实现
 
-`AgentPoolingValue` 是 action-free 的 agent-level 聚合模块。它仍保留在仓库中并有测试覆盖，但**不再处于当前 MAPPO 主训练路径**；当前 attention MAPPO critic 已改为 `concat(team_context) + e_i 条件化调制 + per-agent value head`。
+`AgentPoolingValue` 是 action-free 的 agent-level 聚合模块。它仍保留在仓库中并有测试覆盖，但**不再处于当前 MAPPO 主训练路径**；当前 attention MAPPO critic 已改为 `concat(team_context, e_i) + per-agent value head`。
 
 **与 `AgentPoolingAttention` 的区别**：
 
@@ -675,7 +671,7 @@ encoded = self.encoder(reshaped)  # [batch * N, encoder_dim]
 | 算法   | Attention 支持 | 说明                                                                    |
 | ------ | -------------- | ----------------------------------------------------------------------- |
 | MADDPG | ✅ 完整支持    | Actor + Critic 均有 Attention 版本                                      |
-| MAPPO  | ✅ 完整支持    | 支持 AttentionActorNetwork + AttentionCriticNetwork（team context concat + e_i 调制 + per-agent values） |
+| MAPPO  | ✅ 完整支持    | 支持 AttentionActorNetwork + AttentionCriticNetwork（team_context + e_i concat + per-agent values） |
 | MATD3  | ❌ 不支持      | 使用独立 MLP Actor/双 Critic（无 Attention 编码器）                     |
 | MASAC  | ❌ 不支持      | 使用独立 MLP Actor/双 Critic（无 Attention 编码器）                     |
 
