@@ -1,3 +1,10 @@
+"""
+python main.py test --num_episodes 50 --model_path model_test/model_pth/amappo --config_path model_test/model_config/amappo/amappo.json
+"""
+
+import json
+import os
+
 from marl_models.base_model import MARLModel
 from environment.env import Env
 from utils.logger import Logger, Log
@@ -8,6 +15,29 @@ from train import _should_capture_artifacts
 import config
 import numpy as np
 import time
+
+
+def _compute_test_averages(episode_log: Log) -> dict[str, float]:
+    return {
+        "reward": float(np.mean(episode_log.rewards)) if episode_log.rewards else 0.0,
+        "latency": float(np.mean(episode_log.latencies)) if episode_log.latencies else 0.0,
+        "energy": float(np.mean(episode_log.energies)) if episode_log.energies else 0.0,
+        "fairness": float(np.mean(episode_log.fairness_scores)) if episode_log.fairness_scores else 0.0,
+        "rate": float(np.mean(episode_log.rates)) if episode_log.rates else 0.0,
+        "collisions": float(np.mean(episode_log.collisions)) if episode_log.collisions else 0.0,
+        "boundaries": float(np.mean(episode_log.boundaries)) if episode_log.boundaries else 0.0,
+    }
+
+
+def _save_test_summary(logger: Logger, episode_log: Log, num_episodes: int) -> None:
+    summary_path: str = os.path.join(logger.log_dir, f"test_summary_{logger.timestamp}.json")
+    summary = {
+        "num_episodes": int(num_episodes),
+        "averages": _compute_test_averages(episode_log),
+    }
+    with open(summary_path, "w", encoding="utf-8") as file:
+        json.dump(summary, file, indent=2)
+
 
 def test_model(env: Env, model: MARLModel, logger: Logger, num_episodes: int) -> None:
     start_time: float = time.time()
@@ -56,6 +86,20 @@ def test_model(env: Env, model: MARLModel, logger: Logger, num_episodes: int) ->
             episode_collisions, 
             episode_boundaries
         )
+        logger.log_point(
+            episode,
+            reward=episode_log.rewards[-1],
+            latency=episode_log.latencies[-1],
+            energy=episode_log.energies[-1],
+            fairness=episode_log.fairness_scores[-1],
+            rate=episode_log.rates[-1],
+            collisions=episode_log.collisions[-1],
+            boundaries=episode_log.boundaries[-1],
+            name="episode",
+            elapsed_time=time.time() - start_time,
+        )
         if episode % config.TEST_LOG_FREQ == 0:
             elapsed_time: float = time.time() - start_time
             logger.log_metrics(episode, episode_log, config.TEST_LOG_FREQ, elapsed_time, "episode")
+
+    _save_test_summary(logger, episode_log, num_episodes)

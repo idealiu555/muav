@@ -1,7 +1,7 @@
 import numpy as np
 
 # Training Parameters
-MODEL: str = "mappo"  # options: 'maddpg', 'matd3', 'mappo', 'masac', 'random'
+MODEL: str = "maddpg"  # options: 'maddpg', 'matd3', 'mappo', 'masac', 'random'
 SEED: int = 1234  # random seed for reproducibility
 
 # Initialize random state for config parameters to ensure reproducibility
