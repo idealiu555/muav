@@ -72,7 +72,7 @@ def test_non_attention_actor_outputs_distribution_from_raw_obs() -> None:
     assert isinstance(actor.policy.activation, torch.nn.SiLU)
 
 
-def test_attention_critic_outputs_one_value_per_agent_sample() -> None:
+def test_attention_critic_outputs_team_scalar_values() -> None:
     from marl_models.mappo.agents import AttentionCriticNetwork
 
     critic = AttentionCriticNetwork(config.NUM_UAVS, config.OBS_DIM_SINGLE)
@@ -87,12 +87,9 @@ def test_attention_critic_outputs_one_value_per_agent_sample() -> None:
     values = critic(share_obs)
 
     assert not hasattr(critic, "agent_pooling")
-    assert critic.value_head.fc1.in_features == (
-        config.NUM_UAVS * critic.encoder.output_dim + critic.encoder.output_dim
-    )
-    assert hasattr(critic, "context_norm")
+    assert critic.value_head.fc1.in_features == config.NUM_UAVS * critic.encoder.output_dim
     assert not hasattr(critic, "conditioner")
-    assert tuple(values.shape) == (2, config.NUM_UAVS)
+    assert tuple(values.shape) == (2,)
 
 
 def test_critic_accepts_flattened_share_obs_and_returns_scalar_values() -> None:
@@ -201,8 +198,7 @@ def test_critics_accept_flattened_share_obs_for_both_branches() -> None:
     for critic_cls in (CriticNetwork, AttentionCriticNetwork):
         critic = critic_cls(config.NUM_UAVS, config.OBS_DIM_SINGLE)
         values = critic(share_obs)
-        expected_shape = (3, config.NUM_UAVS) if critic_cls is AttentionCriticNetwork else (3,)
-        assert tuple(values.shape) == expected_shape
+        assert tuple(values.shape) == (3,)
 
 
 def test_rollout_buffer_emits_share_obs_per_flat_sample() -> None:
@@ -240,6 +236,7 @@ def test_rollout_buffer_emits_share_obs_per_flat_sample() -> None:
     for batch in buffer.get_batches(4):
         assert "share_obs" in batch
         assert "obs" in batch
+        assert "agent_index" not in batch
         assert tuple(batch["share_obs"].shape) == (
             batch["obs"].shape[0],
             config.NUM_UAVS * config.OBS_DIM_SINGLE,
@@ -294,31 +291,6 @@ def test_mappo_rollout_replicates_scalar_value_across_agents(monkeypatch) -> Non
         assert tuple(values.shape) == (config.NUM_UAVS,)
         assert np.allclose(values, 7.5)
 
-
-def test_mappo_attention_uses_per_agent_values_without_repeating(monkeypatch) -> None:
-    monkeypatch.setattr(config, "USE_ATTENTION", True)
-    obs = _fake_obs()
-    model = MAPPO(
-        model_name="mappo",
-        num_agents=config.NUM_UAVS,
-        obs_dim=config.OBS_DIM_SINGLE,
-        action_dim=config.ACTION_DIM,
-        device="cpu",
-    )
-
-    per_agent_values = torch.arange(config.NUM_UAVS, dtype=torch.float32).unsqueeze(0)
-
-    def wrapped_forward(share_obs: torch.Tensor) -> torch.Tensor:
-        assert tuple(share_obs.shape) == (1, config.NUM_UAVS * config.OBS_DIM_SINGLE)
-        return per_agent_values.to(share_obs.device)
-
-    model.critics.forward = wrapped_forward  # type: ignore[method-assign]
-    _env_actions, _raw_actions, _log_probs, values = model.get_action_and_value(obs)
-
-    assert tuple(values.shape) == (config.NUM_UAVS,)
-    assert np.allclose(values, np.arange(config.NUM_UAVS, dtype=np.float32))
-
-
 def test_mappo_update_minibatch_uses_share_obs(monkeypatch) -> None:
     torch.manual_seed(7)
     obs = _make_training_obs()
@@ -345,7 +317,6 @@ def test_mappo_update_minibatch_uses_share_obs(monkeypatch) -> None:
             "returns": torch.from_numpy(values).float() + 0.5,
             "old_values": torch.from_numpy(values).float(),
             "active_mask": torch.ones(batch_size, dtype=torch.float32),
-            "agent_index": torch.arange(batch_size, dtype=torch.long),
         }
 
         stats = model._update_minibatch(batch)
@@ -382,7 +353,6 @@ def test_mappo_critic_loss_uses_value_normalizer(monkeypatch) -> None:
         "returns": returns,
         "old_values": old_values,
         "active_mask": torch.ones(config.NUM_UAVS, dtype=torch.float32),
-        "agent_index": torch.arange(config.NUM_UAVS, dtype=torch.long),
     }
 
     mean_before, _var_before = model.value_normalizer.running_mean_var()

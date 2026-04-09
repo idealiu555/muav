@@ -206,21 +206,15 @@ class MAPPO(MARLModel):
             f"expected (1,), ({self.num_agents},), or (1, {self.num_agents})"
         )
 
-    def _critic_values_for_batch(
-        self,
-        critic_output: torch.Tensor,
-        agent_index_batch: torch.Tensor | None,
-    ) -> torch.Tensor:
+    def _critic_values_for_batch(self, critic_output: torch.Tensor) -> torch.Tensor:
         if critic_output.ndim == 1:
             return critic_output
-        if critic_output.ndim != 2 or critic_output.shape[1] != self.num_agents:
-            raise ValueError(
-                f"Unexpected critic batch output shape {tuple(critic_output.shape)}; "
-                f"expected (batch,) or (batch, {self.num_agents})"
-            )
-        if agent_index_batch is None:
-            raise ValueError("agent_index is required when critic returns per-agent values")
-        return critic_output.gather(1, agent_index_batch.long().unsqueeze(1)).squeeze(1)
+        if critic_output.ndim == 2 and critic_output.shape[1] == 1:
+            return critic_output.squeeze(1)
+        raise ValueError(
+            f"Unexpected critic batch output shape {tuple(critic_output.shape)}; "
+            "expected (batch,) or (batch, 1)"
+        )
 
     def _update_minibatch(self, batch: dict[str, torch.Tensor]) -> dict:
         assert isinstance(batch, dict), "MAPPO expects dict batch"
@@ -232,8 +226,6 @@ class MAPPO(MARLModel):
         share_obs_batch: torch.Tensor = batch["share_obs"]
         old_values_batch: torch.Tensor = batch["old_values"]
         active_mask_batch: torch.Tensor = batch["active_mask"]
-        agent_index_batch: torch.Tensor | None = batch.get("agent_index")
-
         actor_mask: torch.Tensor = active_mask_batch.float()
         valid_count = int(actor_mask.sum().item())
 
@@ -272,7 +264,7 @@ class MAPPO(MARLModel):
 
         # Critic Loss (masked)
         critic_output: torch.Tensor = self.critics(share_obs_batch)
-        values: torch.Tensor = self._critic_values_for_batch(critic_output, agent_index_batch)
+        values: torch.Tensor = self._critic_values_for_batch(critic_output)
         values_clipped: torch.Tensor = old_values_batch + torch.clamp(values - old_values_batch, -config.PPO_VALUE_CLIP_EPS, config.PPO_VALUE_CLIP_EPS)
         active_indices = actor_mask > 0.5
         if active_indices.any():

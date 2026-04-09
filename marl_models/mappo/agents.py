@@ -121,9 +121,7 @@ class AttentionCriticNetwork(nn.Module):
         self.obs_dim = obs_dim
         self.encoder = AttentionEncoder()
         self.encoded_share_obs_dim = num_agents * self.encoder.output_dim
-        self.critic_input_dim = self.encoded_share_obs_dim + self.encoder.output_dim
-        self.context_norm: nn.LayerNorm = nn.LayerNorm(self.encoded_share_obs_dim)
-        self.value_head = _ScalarValueHead(self.critic_input_dim)
+        self.value_head = _ScalarValueHead(self.encoded_share_obs_dim)
 
     def forward(self, share_obs: torch.Tensor) -> torch.Tensor:
         joint_obs = _reshape_share_obs(share_obs, self.num_agents, self.obs_dim)
@@ -131,9 +129,4 @@ class AttentionCriticNetwork(nn.Module):
         encoded = self.encoder(joint_obs.reshape(batch_size * self.num_agents, self.obs_dim))
         agent_encodings = encoded.reshape(batch_size, self.num_agents, self.encoder.output_dim)
         team_context = agent_encodings.reshape(batch_size, self.encoded_share_obs_dim)
-        normalized_context = self.context_norm(team_context).unsqueeze(1).expand(-1, self.num_agents, -1)
-        critic_inputs = torch.cat([normalized_context, agent_encodings], dim=-1)
-        per_agent_values = self.value_head(
-            critic_inputs.reshape(batch_size * self.num_agents, self.critic_input_dim)
-        )
-        return per_agent_values.reshape(batch_size, self.num_agents)
+        return self.value_head(team_context)
