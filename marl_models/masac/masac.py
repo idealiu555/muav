@@ -1,5 +1,5 @@
 from marl_models.base_model import MARLModel, ExperienceBatch
-from marl_models.masac.agents import ActorNetwork, CriticNetwork
+from marl_models.masac.agents import ActorNetwork, AttentionActorNetwork, AttentionCriticNetwork, CriticNetwork
 from marl_models.buffer_and_helpers import soft_update, masked_mean
 import config
 import torch
@@ -17,20 +17,19 @@ class MASAC(MARLModel):
         self.total_obs_dim: int = num_agents * obs_dim
         self.total_action_dim: int = num_agents * action_dim
         self.checkpoint_path = "masac.pt"
+        actor_cls = AttentionActorNetwork if config.USE_ATTENTION else ActorNetwork
+        critic_cls = AttentionCriticNetwork if config.USE_ATTENTION else CriticNetwork
 
-        self.actors = nn.ModuleList(ActorNetwork(obs_dim, action_dim) for _ in range(num_agents)).to(device)
-        self.critics_1 = nn.ModuleList(
-            CriticNetwork(self.total_obs_dim, self.total_action_dim) for _ in range(num_agents)
-        ).to(device)
-        self.critics_2 = nn.ModuleList(
-            CriticNetwork(self.total_obs_dim, self.total_action_dim) for _ in range(num_agents)
-        ).to(device)
-        self.target_critics_1 = nn.ModuleList(
-            CriticNetwork(self.total_obs_dim, self.total_action_dim) for _ in range(num_agents)
-        ).to(device)
-        self.target_critics_2 = nn.ModuleList(
-            CriticNetwork(self.total_obs_dim, self.total_action_dim) for _ in range(num_agents)
-        ).to(device)
+        self.actors = nn.ModuleList(actor_cls(obs_dim, action_dim) for _ in range(num_agents)).to(device)
+        if critic_cls is AttentionCriticNetwork:
+            critic_factory = lambda: critic_cls(num_agents, obs_dim, action_dim)
+        else:
+            critic_factory = lambda: critic_cls(self.total_obs_dim, self.total_action_dim)
+
+        self.critics_1 = nn.ModuleList(critic_factory() for _ in range(num_agents)).to(device)
+        self.critics_2 = nn.ModuleList(critic_factory() for _ in range(num_agents)).to(device)
+        self.target_critics_1 = nn.ModuleList(critic_factory() for _ in range(num_agents)).to(device)
+        self.target_critics_2 = nn.ModuleList(critic_factory() for _ in range(num_agents)).to(device)
         self.log_alphas = nn.ParameterList(
             [nn.Parameter(torch.zeros(1, device=self.device)) for _ in range(num_agents)]
         )

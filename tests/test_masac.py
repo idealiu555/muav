@@ -2,12 +2,18 @@ from pathlib import Path
 import sys
 
 import numpy as np
+import pytest
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import config
-from marl_models.masac.agents import ActorNetwork, CriticNetwork
+from marl_models.masac.agents import (
+    ActorNetwork,
+    AttentionActorNetwork,
+    AttentionCriticNetwork,
+    CriticNetwork,
+)
 from marl_models.masac.masac import MASAC
 
 
@@ -57,6 +63,37 @@ def test_masac_networks_use_silu_not_relu() -> None:
     assert any(isinstance(module, torch.nn.SiLU) for module in critic.modules())
     assert not any(isinstance(module, torch.nn.ReLU) for module in actor.modules())
     assert not any(isinstance(module, torch.nn.ReLU) for module in critic.modules())
+
+
+def test_masac_attention_networks_forward_with_expected_shapes() -> None:
+    actor = AttentionActorNetwork(obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM)
+    critic = AttentionCriticNetwork(num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM)
+
+    actions, log_prob = actor.sample(torch.randn(4, config.OBS_DIM_SINGLE))
+    q_values = critic(
+        torch.randn(4, 2 * config.OBS_DIM_SINGLE),
+        torch.randn(4, 2 * config.ACTION_DIM),
+    )
+
+    assert actions.shape == (4, config.ACTION_DIM)
+    assert log_prob.shape == (4, 1)
+    assert torch.isfinite(log_prob).all()
+    assert q_values.shape == (4, 1)
+
+
+def test_masac_attention_actor_rejects_invalid_obs_dim() -> None:
+    with pytest.raises(ValueError, match="OBS_DIM_SINGLE"):
+        AttentionActorNetwork(obs_dim=config.OBS_DIM_SINGLE - 1, action_dim=config.ACTION_DIM)
+
+
+def test_masac_attention_critic_rejects_invalid_action_width() -> None:
+    critic = AttentionCriticNetwork(num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM)
+
+    with pytest.raises(ValueError, match="joint_action"):
+        critic(
+            torch.randn(4, 2 * config.OBS_DIM_SINGLE),
+            torch.randn(4, 2 * config.ACTION_DIM - 1),
+        )
 
 
 def test_masac_uses_adam_without_weight_decay() -> None:
@@ -122,3 +159,34 @@ def test_masac_save_and_load_round_trip(tmp_path: Path) -> None:
 
     for key, value in model.state_dict().items():
         assert torch.equal(value, restored.state_dict()[key])
+
+
+def test_masac_builds_attention_networks_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "USE_ATTENTION", True)
+
+    model = MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
+
+    assert isinstance(model.actors[0], AttentionActorNetwork)
+    assert isinstance(model.critics_1[0], AttentionCriticNetwork)
+    assert isinstance(model.critics_2[0], AttentionCriticNetwork)
+    assert isinstance(model.target_critics_1[0], AttentionCriticNetwork)
+    assert isinstance(model.target_critics_2[0], AttentionCriticNetwork)
+
+
+def test_masac_attention_targets_remain_frozen(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "USE_ATTENTION", True)
+
+    model = MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
+
+    assert all(not param.requires_grad for param in model.target_critics_1.parameters())
+    assert all(not param.requires_grad for param in model.target_critics_2.parameters())
+
+
+def test_masac_attention_update_smoke(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "USE_ATTENTION", True)
+
+    model = MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
+    stats = model.update(_make_batch(4, 2, config.OBS_DIM_SINGLE, config.ACTION_DIM))
+
+    assert np.isfinite(stats["actor_loss"])
+    assert np.isfinite(stats["critic_loss"])

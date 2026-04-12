@@ -24,7 +24,7 @@ def _make_batch(batch_size: int, num_agents: int, obs_dim: int, action_dim: int)
     }
 
 
-def test_standard_maddpg_networks_use_relu_and_expected_shapes() -> None:
+def test_standard_maddpg_networks_use_silu_and_expected_shapes() -> None:
     actor = ActorNetwork(obs_dim=12, action_dim=3)
     critic = CriticNetwork(total_obs_dim=36, total_action_dim=9)
 
@@ -37,8 +37,10 @@ def test_standard_maddpg_networks_use_relu_and_expected_shapes() -> None:
     assert critic_output.shape == (4, 1)
     assert torch.all(actor_output <= 1.0)
     assert torch.all(actor_output >= -1.0)
-    assert not any(isinstance(module, torch.nn.SiLU) for module in actor.modules())
-    assert not any(isinstance(module, torch.nn.SiLU) for module in critic.modules())
+    assert any(isinstance(module, torch.nn.SiLU) for module in actor.modules())
+    assert any(isinstance(module, torch.nn.SiLU) for module in critic.modules())
+    assert not any(isinstance(module, torch.nn.ReLU) for module in actor.modules())
+    assert not any(isinstance(module, torch.nn.ReLU) for module in critic.modules())
 
 
 def test_obsolete_maddpg_attention_pooling_symbols_are_removed() -> None:
