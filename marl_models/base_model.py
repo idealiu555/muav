@@ -1,13 +1,14 @@
 from abc import ABC, abstractmethod
 import numpy as np
 import torch
+import torch.nn as nn
 
 OffPolicyExperienceBatch = dict[str, np.ndarray]
 OnPolicyExperienceBatch = dict[str, torch.Tensor]
 ExperienceBatch = OffPolicyExperienceBatch | OnPolicyExperienceBatch
 
 
-class MARLModel(ABC):
+class MARLModel(nn.Module, ABC):
     """
     Abstract Base Class for Multi-Agent Reinforcement Learning models.
     This class defines the essential methods that any MARL algorithm implementation
@@ -15,6 +16,7 @@ class MARLModel(ABC):
     """
 
     def __init__(self, model_name: str, num_agents: int, obs_dim: int, action_dim: int, device: str) -> None:
+        super().__init__()
         self.model_name = model_name
         self.num_agents = num_agents
         self.obs_dim = obs_dim

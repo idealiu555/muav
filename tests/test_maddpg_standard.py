@@ -61,6 +61,23 @@ def test_maddpg_ignores_attention_flag_and_uses_standard_networks(monkeypatch) -
         assert not hasattr(model, "shared_encoder_optimizer")
 
 
+def test_maddpg_registers_modules_in_state_dict() -> None:
+    model = MADDPG(
+        "maddpg",
+        num_agents=2,
+        obs_dim=config.OBS_DIM_SINGLE,
+        action_dim=config.ACTION_DIM,
+        device="cpu",
+    )
+
+    assert isinstance(model.actors, torch.nn.ModuleList)
+    assert isinstance(model.critics, torch.nn.ModuleList)
+    assert isinstance(model.target_actors, torch.nn.ModuleList)
+    assert isinstance(model.target_critics, torch.nn.ModuleList)
+    assert "actors.0.fc1.weight" in model.state_dict()
+    assert "critics.0.fc1.weight" in model.state_dict()
+
+
 def test_maddpg_update_runs_without_attention_branch(monkeypatch) -> None:
     monkeypatch.setattr(config, "USE_ATTENTION", True)
     model = MADDPG("maddpg", num_agents=2, obs_dim=8, action_dim=2, device="cpu")
