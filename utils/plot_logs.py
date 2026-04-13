@@ -50,6 +50,20 @@ COLORS = {
 }
 
 
+def resolve_x_axis(entry: dict) -> tuple[str, str]:
+    """
+    统一解析日志的x轴字段。
+
+    标准字段是 ``episode``；为兼容历史 MAPPO 日志，也接受 ``update``，
+    但绘图时统一显示为 ``Episode``。
+    """
+    if "episode" in entry:
+        return "episode", "Episode"
+    if "update" in entry:
+        return "update", "Episode"
+    raise KeyError("episode/update")
+
+
 def smooth_curve(values: np.ndarray, smoothing_weight: float = 0.9) -> np.ndarray:
     """
     使用指数移动平均(EMA)平滑曲线。
@@ -269,14 +283,10 @@ def generate_plots(
     
     os.makedirs(output_dir, exist_ok=True)
 
-    # 确定x轴类型
-    if "update" in log_data[0]:
-        x_axis_key: str = "update"
-        x_label: str = "Training Update"
-    elif "episode" in log_data[0]:
-        x_axis_key = "episode"
-        x_label = "Episode"
-    else:
+    # 确定x轴类型；历史update日志在绘图中统一映射为Episode
+    try:
+        x_axis_key, x_label = resolve_x_axis(log_data[0])
+    except KeyError:
         print("❌ Log file does not contain 'episode' or 'update' keys.")
         return
     

@@ -13,7 +13,7 @@ import sys
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
-from utils.plot_logs import ACADEMIC_STYLE, COLORS, smooth_curve
+from utils.plot_logs import ACADEMIC_STYLE, COLORS, resolve_x_axis, smooth_curve
 
 def load_log_data(file_path: str) -> list[dict]:
     """支持读取标准 JSON 格式或新版 JSONL 格式的日志文件。"""
@@ -79,69 +79,40 @@ def plot_algorithm_comparison(
 
     ylabel = metric_config[metric]
     
-    # 第一步：检测所有文件的 x 轴类型并校验一致性
-    detected_x_labels = []  # 收集所有文件的 x 轴类型
-    x_label = None
-    x_axis_key = None
+    # 第一步：读取并校验日志；episode 是标准字段，update 兼容后统一显示为 Episode
+    x_label = "Episode"
     file_data_cache = {}  # 缓存文件数据，避免重复读取
     
     for log_file in log_files:
         if not os.path.exists(log_file):
             print(f"⚠️ 警告: 文件未找到，跳过: {log_file}")
-            detected_x_labels.append(None)
             continue
             
         try:
             data = load_log_data(log_file)
             if not data:
                 print(f"⚠️ 警告: 文件为空或格式错误，跳过: {log_file}")
-                detected_x_labels.append(None)
                 continue
             
             file_data_cache[log_file] = data  # 缓存数据
-            
-            # 检测 x 轴类型
-            if "update" in data[0]:
-                current_x_label = "Training Update"
-                current_x_key = "update"
-            elif "episode" in data[0]:
-                current_x_label = "Episode"
-                current_x_key = "episode"
-            else:
+
+            try:
+                resolve_x_axis(data[0])
+            except KeyError:
                 print(f"❌ 错误: 文件 {log_file} 缺少 'episode' 或 'update' 键。")
                 print(f"   可用键: {list(data[0].keys())}")
-                detected_x_labels.append(None)
                 continue
-            
-            # 设置第一个有效文件的 x 轴类型
-            if x_label is None:
-                x_label = current_x_label
-                x_axis_key = current_x_key
-            
-            detected_x_labels.append(current_x_label)
-            
+
         except json.JSONDecodeError as e:
             print(f"❌ JSON 解析错误 {log_file}: {e}")
-            detected_x_labels.append(None)
         except Exception as e:
             print(f"❌ 读取文件出错 {log_file}: {e}")
-            detected_x_labels.append(None)
-    
-    # 校验 x 轴类型一致性
-    valid_x_labels = [x for x in detected_x_labels if x is not None]
-    if len(valid_x_labels) == 0:
+
+    if len(file_data_cache) == 0:
         print("❌ 错误: 没有找到任何有效的日志文件。")
         return
-    
-    unique_x_labels = set(valid_x_labels)
-    if len(unique_x_labels) > 1:
-        print(f"❌ 错误: 检测到混用的 x 轴类型: {unique_x_labels}")
-        print(f"   不同算法的日志文件使用了不同的 x 轴单位（Episode vs Training Update）。")
-        print(f"   这会导致数值范围完全不同，无法进行有意义的对比。")
-        print(f"   请确保所有对比文件使用相同的 x 轴单位。")
-        return
-    
-    # 第二步：使用统一的 x_axis_key 提取所有文件的数据
+
+    # 第二步：每个文件独立提取x轴；update兼容映射为Episode
     all_data = []
     for log_file in log_files:
         if log_file not in file_data_cache:
@@ -150,21 +121,16 @@ def plot_algorithm_comparison(
             
         try:
             data = file_data_cache[log_file]
-            
-            # 检查键是否存在
-            if x_axis_key not in data[0]:
-                print(f"❌ 错误: 文件 {log_file} 缺少键 '{x_axis_key}'。")
-                print(f"   可用键: {list(data[0].keys())}")
-                all_data.append(None)
-                continue
-            
+
+            x_axis_key, _ = resolve_x_axis(data[0])
+
             if metric not in data[0]:
                 print(f"❌ 错误: 文件 {log_file} 缺少指标键 '{metric}'。")
                 print(f"   可用键: {list(data[0].keys())}")
                 all_data.append(None)
                 continue
             
-            # 提取数据（使用统一的 x_axis_key）
+            # 提取数据；对外统一显示为Episode
             x = [entry[x_axis_key] for entry in data]
             y = [entry[metric] for entry in data]
             all_data.append((x, y))
