@@ -4,7 +4,7 @@
 #     --output comparison_reward.png \
 #     --metric reward
 
-# python plot_comparison.py --files train_logs/amappo.json train_logs/mappo.json --labels "AMAPPO" "MAPPO" --output comparison_reward.png --metric reward
+# python plot_comparison.py --files train_logs/amasac.json train_logs/masac.json train_logs/maddpg.json train_logs/random.json --labels "AMASAC" "MASAC" "MADDPG" "Random" --output comparison_reward.png --metric reward
 
 import argparse
 import json
