@@ -1,6 +1,7 @@
 """
-注意力机制模块：处理可变长度的 UE 列表
-使用 Cross-Attention 架构：UAV 状态作为 Query，UE 特征作为 Key/Value
+注意力编码模块：处理可变长度的 UE / Neighbor 列表。
+使用 UAV embedding 作为条件，通过 query projection + 多层 cross-attention refinement
+迭代汇总实体信息；空分支保持为中性 summary。
 """
 import torch
 import torch.nn as nn
@@ -136,10 +137,10 @@ class UAVEmbedding(nn.Module):
 
 class CrossAttention(nn.Module):
     """
-    交叉注意力模块：UAV 状态作为 Query，UE/Neighbor 特征作为 Key/Value
+    交叉注意力模块：分支 summary/query 向量关注实体 token 序列。
 
-    Q 来自 UAV 状态，表示"UAV 想要关注什么"
-    K, V 来自 UE 特征，表示"每个 UE 的关键信息和内容"
+    Q 表示当前分支的查询或摘要向量。
+    K, V 来自通用实体 token 序列（UE 或 Neighbor）。
     """
 
     def __init__(self, query_dim: int, kv_dim: int, num_heads: int = 4):
@@ -148,7 +149,7 @@ class CrossAttention(nn.Module):
         self.head_dim = kv_dim // num_heads
         assert kv_dim % num_heads == 0, "kv_dim must be divisible by num_heads"
 
-        # Q 来自 UAV，K, V 来自 UE/Neighbor
+        # Q 来自当前分支的 query/summary，K/V 来自实体 token 序列
         self.q_proj = layer_init(nn.Linear(query_dim, kv_dim))
         self.k_proj = layer_init(nn.Linear(kv_dim, kv_dim))
         self.v_proj = layer_init(nn.Linear(kv_dim, kv_dim))
@@ -161,9 +162,9 @@ class CrossAttention(nn.Module):
                 mask: torch.Tensor | None = None) -> torch.Tensor:
         """
         Args:
-            query: [batch, query_dim] UAV embedding
-            kv: [batch, seq_len, kv_dim] UE/Neighbor embeddings
-            mask: [batch, seq_len] 1=真实数据, 0=padding
+            query: [batch, query_dim] 分支 query / summary 向量
+            kv: [batch, seq_len, kv_dim] 实体 token 序列（UE 或 Neighbor）
+            mask: [batch, seq_len] 1=有效实体 token, 0=padding
         Returns:
             output: [batch, kv_dim] 聚合后的特征
         """
@@ -199,6 +200,46 @@ class CrossAttention(nn.Module):
         # 合并多头
         output = output.transpose(1, 2).contiguous().view(batch_size, -1)
         return self.out_proj(output)  # [batch, kv_dim]
+
+
+class FeedForward(nn.Module):
+    def __init__(self, dim: int) -> None:
+        super().__init__()
+        self.fc1 = layer_init(nn.Linear(dim, dim * 4))
+        self.fc2 = layer_init(nn.Linear(dim * 4, dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.fc2(F.silu(self.fc1(x)))
+
+
+class AttentionBlock(nn.Module):
+    """残差注意力块：使用当前 summary query 迭代细化实体汇总。"""
+
+    def __init__(self, dim: int, num_heads: int) -> None:
+        super().__init__()
+        self.attn = CrossAttention(dim, dim, num_heads)
+        self.norm1 = nn.LayerNorm(dim)
+        self.ffn = FeedForward(dim)
+        self.norm2 = nn.LayerNorm(dim)
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        kv: torch.Tensor,
+        mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        attended = self.attn(query, kv, mask)
+        x = self.norm1(attended + query)
+        x = self.norm2(x + self.ffn(x))
+        return x
+
+
+def zero_empty_summary(summary: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+    """对空实体分支输出中性 summary，避免残差 query 泄露到结果中。"""
+    if mask is None:
+        return summary
+    has_tokens = mask.sum(dim=1, keepdim=True) > 0
+    return summary * has_tokens.to(summary.dtype)
 
 
 def parse_observation(obs: torch.Tensor) -> dict:
@@ -273,15 +314,16 @@ class AttentionEncoder(nn.Module):
     架构：
     1. 解析观测 -> 结构化数据
     2. UAV Embedding -> [batch, 64]
-    3. UE Embedding + CrossAttention -> [batch, 128]
-    4. Neighbor Embedding + CrossAttention -> [batch, 64]
-    5. 拼接 -> [batch, 256]
+    3. UAV summary query 投影到各分支维度
+    4. UE / Neighbor Embedding + 两层残差 CrossAttention 迭代细化 summary
+    5. 空分支显式归零，保持“无实体摘要”语义
+    6. 拼接 -> [batch, 256]
 
     设计原则：
     - 输入维度 380，输出维度 256（轻微压缩）
-    - UE attention: heads=2, head_dim=64（符合最佳实践）
-    - Neighbor attention: heads=2, head_dim=32（符合最佳实践）
-    - UE 维度较大（50个UE，信息量最大）
+    - 每个分支先用 query projection 对齐维度，再用两层 attention block 做摘要 refinement
+    - UE 分支输出 128 维，Neighbor 分支输出 64 维，保持外部接口不变
+    - 当 UE / Neighbor 数量为 0 时，对应分支输出保持中性 summary
     """
 
     def __init__(self, num_files: int = config.NUM_FILES,
@@ -297,10 +339,16 @@ class AttentionEncoder(nn.Module):
         self.neighbor_embed = NeighborEmbedding(num_files, neighbor_out_dim)
 
         # 注意力模块
-        # UE attention: query=64, kv=128, heads=2 -> head_dim=64 ✓
-        self.ue_attention = CrossAttention(uav_embed_dim, ue_embed_dim, num_heads)
-        # Neighbor attention: query=64, kv=64, heads=2 -> head_dim=32 ✓
-        self.neighbor_attention = CrossAttention(uav_embed_dim, neighbor_out_dim, num_heads)
+        self.ue_query_proj = layer_init(nn.Linear(uav_embed_dim, ue_embed_dim))
+        self.neighbor_query_proj = layer_init(nn.Linear(uav_embed_dim, neighbor_out_dim))
+        self.ue_attention_blocks = nn.ModuleList([
+            AttentionBlock(ue_embed_dim, num_heads),
+            AttentionBlock(ue_embed_dim, num_heads),
+        ])
+        self.neighbor_attention_blocks = nn.ModuleList([
+            AttentionBlock(neighbor_out_dim, num_heads),
+            AttentionBlock(neighbor_out_dim, num_heads),
+        ])
 
         # 输出维度：uav(64) + ue_attn(128) + neighbor_attn(64) = 256
         self.output_dim = uav_embed_dim + ue_embed_dim + neighbor_out_dim
@@ -320,11 +368,17 @@ class AttentionEncoder(nn.Module):
 
         # UE attention
         ue_emb = self.ue_embed(parsed['ue_features'])
-        ue_attn = self.ue_attention(uav_emb, ue_emb, parsed['ue_mask'])
+        ue_attn = self.ue_query_proj(uav_emb)
+        for block in self.ue_attention_blocks:
+            ue_attn = block(ue_attn, ue_emb, parsed['ue_mask'])
+        ue_attn = zero_empty_summary(ue_attn, parsed['ue_mask'])
 
         # Neighbor attention
         neighbor_emb = self.neighbor_embed(parsed['neighbor_features'])
-        neighbor_attn = self.neighbor_attention(uav_emb, neighbor_emb, parsed['neighbor_mask'])
+        neighbor_attn = self.neighbor_query_proj(uav_emb)
+        for block in self.neighbor_attention_blocks:
+            neighbor_attn = block(neighbor_attn, neighbor_emb, parsed['neighbor_mask'])
+        neighbor_attn = zero_empty_summary(neighbor_attn, parsed['neighbor_mask'])
 
         # 拼接所有特征
         return torch.cat([uav_emb, ue_attn, neighbor_attn], dim=-1)

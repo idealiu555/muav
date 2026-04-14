@@ -130,11 +130,11 @@ REWARD_SCALING_FACTOR: float = 0.12  # scaling factor for rewards (归一化后�
 # Balanced scales to make log1p(scaled) ≈ 1.5-2.0 for each component
 LATENCY_REWARD_SCALE: float = NUM_UES * TIME_SLOT_DURATION * 6  # ~600
 ENERGY_REWARD_SCALE: float = NUM_UAVS * POWER_HOVER * TIME_SLOT_DURATION * 0.5  # 200
-RATE_REWARD_SCALE: float = 1.2e8
+RATE_REWARD_SCALE: float = 1.8e8
 
 # JFI reward parameters (balanced around midpoint)
 JFI_BASELINE: float = 0.6  # JFI midpoint: symmetric reward/penalty
-JFI_SCALE: float = 5.4    # Moderate scaling for JFI deviation
+JFI_SCALE: float = 4.8    # Moderate scaling for JFI deviation
 JFI_CLIP_MIN: float = -2.0  # Narrower clip range
 JFI_CLIP_MAX: float = 2.0
 
@@ -205,4 +205,6 @@ PPO_MAX_LOG_RATIO: float = 10.0  # clip log-ratio before exp to avoid numerical 
 PPO_VALUE_LOSS_COEF: float = 0.5  # coefficient for value function loss (PPO paper default)
 
 # MASAC Specific Hyperparameters
+ALPHA_MIN: float = 1e-3  # lower bound for entropy temperature to avoid collapsing exploration entirely
+TARGET_ENTROPY_SCALE: float = 0.5  # scales the default SAC target entropy of -action_dim
 ALPHA_LR: float = 3e-4  # learning rate for the entropy temperature alpha

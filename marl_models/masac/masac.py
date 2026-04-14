@@ -14,6 +14,7 @@ class MASAC(MARLModel):
 
     def __init__(self, model_name: str, num_agents: int, obs_dim: int, action_dim: int, device: str) -> None:
         super().__init__(model_name, num_agents, obs_dim, action_dim, device)
+        self._validate_hyperparameters()
         self.total_obs_dim: int = num_agents * obs_dim
         self.total_action_dim: int = num_agents * action_dim
         self.checkpoint_path = "masac.pt"
@@ -49,7 +50,7 @@ class MASAC(MARLModel):
             for critic in self.critics_2
         ]
 
-        self.target_entropy: float = -float(action_dim)
+        self.target_entropy: float = -float(action_dim) * config.TARGET_ENTROPY_SCALE
         self.alpha_optimizers: list[torch.optim.Adam] = [
             torch.optim.Adam([log_alpha], lr=config.ALPHA_LR, weight_decay=0.0)
             for log_alpha in self.log_alphas
@@ -104,6 +105,7 @@ class MASAC(MARLModel):
         q_values: list[float] = []
         updated_agents: int = 0
 
+        self._clamp_log_alphas()
         alpha_tensors: list[torch.Tensor] = [log_alpha.exp() for log_alpha in self.log_alphas]
 
         with torch.no_grad():
@@ -167,6 +169,7 @@ class MASAC(MARLModel):
             self.alpha_optimizers[agent_idx].zero_grad(set_to_none=True)
             alpha_loss.backward()
             self.alpha_optimizers[agent_idx].step()
+            self._clamp_log_alpha(self.log_alphas[agent_idx])
 
             total_alpha_loss += alpha_loss.item()
             updated_agents += 1
@@ -185,6 +188,25 @@ class MASAC(MARLModel):
             "critic_grad_norm": total_critic_grad_norm / normalizer,
             "q_value_mean": float(np.mean(q_values)) if q_values else 0.0,
         }
+
+    def _validate_hyperparameters(self) -> None:
+        if config.ALPHA_MIN <= 0.0:
+            raise ValueError(f"ALPHA_MIN must be positive, got {config.ALPHA_MIN}")
+        if config.TARGET_ENTROPY_SCALE <= 0.0:
+            raise ValueError(
+                f"TARGET_ENTROPY_SCALE must be positive, got {config.TARGET_ENTROPY_SCALE}"
+            )
+
+    def _min_log_alpha(self) -> float:
+        return float(np.log(config.ALPHA_MIN))
+
+    def _clamp_log_alpha(self, log_alpha: torch.Tensor) -> None:
+        with torch.no_grad():
+            log_alpha.clamp_(min=self._min_log_alpha())
+
+    def _clamp_log_alphas(self) -> None:
+        for log_alpha in self.log_alphas:
+            self._clamp_log_alpha(log_alpha)
 
     def _init_target_networks(self) -> None:
         for critic1, target_critic1 in zip(self.critics_1, self.target_critics_1):

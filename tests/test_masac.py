@@ -119,6 +119,67 @@ def test_masac_update_reports_current_alpha_mean() -> None:
     assert np.isclose(stats["alpha_mean"], actual_alpha_mean)
 
 
+def test_masac_scales_target_entropy_from_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "TARGET_ENTROPY_SCALE", 0.5, raising=False)
+
+    model = MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
+
+    assert model.target_entropy == -float(config.ACTION_DIM) * config.TARGET_ENTROPY_SCALE
+
+
+def test_masac_clamps_alpha_to_configured_minimum(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "ALPHA_MIN", 1e-3, raising=False)
+
+    model = MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
+    batch = _make_batch(batch_size=4, num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM)
+
+    with torch.no_grad():
+        for log_alpha in model.log_alphas:
+            log_alpha.fill_(np.log(1e-6))
+
+    model.update(batch)
+
+    assert all(log_alpha.detach().exp().item() >= config.ALPHA_MIN - 1e-7 for log_alpha in model.log_alphas)
+
+
+def test_masac_clamps_alpha_before_using_it_in_update(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "ALPHA_MIN", 1e-3, raising=False)
+
+    model = MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
+    batch = _make_batch(batch_size=4, num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM)
+
+    with torch.no_grad():
+        for log_alpha in model.log_alphas:
+            log_alpha.fill_(np.log(1e-6))
+
+    observed_alphas: list[float] = []
+
+    def fake_optimize_actor(*, alpha: torch.Tensor, **_: object) -> tuple[torch.Tensor, torch.Tensor, float]:
+        observed_alphas.append(float(alpha.detach().item()))
+        return torch.tensor(0.0, device=model.device), torch.zeros((4, 1), device=model.device), 0.0
+
+    monkeypatch.setattr(model, "_optimize_actor", fake_optimize_actor)
+
+    model.update(batch)
+
+    assert observed_alphas
+    assert min(observed_alphas) >= config.ALPHA_MIN - 1e-7
+
+
+def test_masac_rejects_non_positive_alpha_min(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "ALPHA_MIN", 0.0, raising=False)
+
+    with pytest.raises(ValueError, match="ALPHA_MIN"):
+        MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
+
+
+def test_masac_rejects_non_positive_target_entropy_scale(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "TARGET_ENTROPY_SCALE", 0.0, raising=False)
+
+    with pytest.raises(ValueError, match="TARGET_ENTROPY_SCALE"):
+        MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
+
+
 def test_masac_actor_step_does_not_accumulate_critic_gradients() -> None:
     model = MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
     batch = _make_batch(batch_size=4, num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM)
