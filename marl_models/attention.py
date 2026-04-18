@@ -242,6 +242,11 @@ def zero_empty_summary(summary: torch.Tensor, mask: torch.Tensor | None) -> torc
     return summary * has_tokens.to(summary.dtype)
 
 
+def build_attention_stack(dim: int, num_heads: int, num_layers: int) -> nn.ModuleList:
+    """Create a residual cross-attention stack with unique block instances."""
+    return nn.ModuleList([AttentionBlock(dim, num_heads) for _ in range(num_layers)])
+
+
 def parse_observation(obs: torch.Tensor) -> dict:
     """
     解析 flat vector 观测为结构化数据
@@ -315,13 +320,13 @@ class AttentionEncoder(nn.Module):
     1. 解析观测 -> 结构化数据
     2. UAV Embedding -> [batch, 64]
     3. UAV summary query 投影到各分支维度
-    4. UE / Neighbor Embedding + 两层残差 CrossAttention 迭代细化 summary
+    4. UE / Neighbor Embedding + 多层残差 CrossAttention 迭代细化 summary
     5. 空分支显式归零，保持“无实体摘要”语义
     6. 拼接 -> [batch, 256]
 
     设计原则：
     - 输入维度 380，输出维度 256（轻微压缩）
-    - 每个分支先用 query projection 对齐维度，再用两层 attention block 做摘要 refinement
+    - 每个分支先用 query projection 对齐维度，再用多层 attention block 做摘要 refinement
     - UE 分支输出 128 维，Neighbor 分支输出 64 维，保持外部接口不变
     - 当 UE / Neighbor 数量为 0 时，对应分支输出保持中性 summary
     """
@@ -330,8 +335,11 @@ class AttentionEncoder(nn.Module):
                  ue_embed_dim: int = config.ATTENTION_EMBED_DIM,
                  uav_embed_dim: int = config.ATTENTION_UAV_EMBED_DIM,
                  neighbor_out_dim: int = config.ATTENTION_NEIGHBOR_DIM,
-                 num_heads: int = config.ATTENTION_NUM_HEADS):
+                 num_heads: int = config.ATTENTION_NUM_HEADS,
+                 num_layers: int = config.ATTENTION_NUM_LAYERS):
         super().__init__()
+        if num_layers <= 0:
+            raise ValueError(f"AttentionEncoder requires num_layers > 0, got {num_layers}")
 
         # Embedding 模块
         self.uav_embed = UAVEmbedding(num_files, uav_embed_dim)
@@ -341,14 +349,8 @@ class AttentionEncoder(nn.Module):
         # 注意力模块
         self.ue_query_proj = layer_init(nn.Linear(uav_embed_dim, ue_embed_dim))
         self.neighbor_query_proj = layer_init(nn.Linear(uav_embed_dim, neighbor_out_dim))
-        self.ue_attention_blocks = nn.ModuleList([
-            AttentionBlock(ue_embed_dim, num_heads),
-            AttentionBlock(ue_embed_dim, num_heads),
-        ])
-        self.neighbor_attention_blocks = nn.ModuleList([
-            AttentionBlock(neighbor_out_dim, num_heads),
-            AttentionBlock(neighbor_out_dim, num_heads),
-        ])
+        self.ue_attention_blocks = build_attention_stack(ue_embed_dim, num_heads, num_layers)
+        self.neighbor_attention_blocks = build_attention_stack(neighbor_out_dim, num_heads, num_layers)
 
         # 输出维度：uav(64) + ue_attn(128) + neighbor_attn(64) = 256
         self.output_dim = uav_embed_dim + ue_embed_dim + neighbor_out_dim

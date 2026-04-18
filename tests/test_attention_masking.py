@@ -51,6 +51,13 @@ def test_attention_encoder_outputs_expected_shape_for_zero_count_obs() -> None:
     assert torch.isfinite(encoded).all()
 
 
+def test_attention_encoder_uses_configured_attention_blocks_per_entity_branch() -> None:
+    encoder = AttentionEncoder()
+
+    assert len(encoder.ue_attention_blocks) == config.ATTENTION_NUM_LAYERS
+    assert len(encoder.neighbor_attention_blocks) == config.ATTENTION_NUM_LAYERS
+
+
 def test_attention_encoder_zero_count_obs_zeroes_entity_summary_slices() -> None:
     encoder = AttentionEncoder()
     obs = _make_obs_batch(batch_size=3)

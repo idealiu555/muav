@@ -64,6 +64,7 @@ ATTENTION_EMBED_DIM: int = 128  # UE 注意力的 embedding 维度 (heads=2, hea
 ATTENTION_UAV_EMBED_DIM: int = 64  # UAV 状态的 embedding 维度
 ATTENTION_NEIGHBOR_DIM: int = 64  # Neighbor 注意力输出维度 (heads=2, head_dim=32)
 ATTENTION_NUM_HEADS: int = 2  # 多头注意力的头数
+ATTENTION_NUM_LAYERS: int = 4  # 每个实体分支的残差 cross-attention 层数
 
 POWER_MOVE: float = 60.0  # P_move in Watts
 POWER_HOVER: float = 40.0  # P_hover in Watts
