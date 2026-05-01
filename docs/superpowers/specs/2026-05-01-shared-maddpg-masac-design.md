@@ -149,7 +149,15 @@ Exploration noise remains per-agent runtime state even though actor parameters a
 
 Because the critic scores a joint action, entropy regularization should also be applied at the joint-policy level. The design therefore defines:
 
-- `log_pi_joint = sum_i log pi(a_i | o_i)`
+- `masked_log_pi_i = log pi(a_i | o_i) * mask_i`
+- `log_pi_joint = sum_i masked_log_pi_i`
+
+The masking rule is required. Zeroing an invalid agent's action is not enough on its own, because an inactive agent can still produce a finite stochastic log-probability that would otherwise pollute the joint entropy term.
+
+Mask choice depends on which path is being computed:
+
+- for the current-state actor loss and alpha loss, use `active_mask_i`;
+- for the next-state target calculation, use the corresponding bootstrap-valid mask for each agent.
 
 This same joint log-probability definition must be used consistently in:
 
@@ -168,6 +176,8 @@ Where:
 
 - `r_team = rewards[:, 0:1]`
 - all reward columns must match exactly, otherwise training raises an error.
+
+When constructing `target_q`, `alpha` must be treated as a scalar coefficient rather than part of the critic optimization path. The implementation should therefore ensure the critic loss does not backpropagate into `log_alpha`.
 
 ### Critic Update
 
@@ -191,6 +201,8 @@ The actor loss becomes:
 - `actor_loss = masked_mean(alpha * log_pi_joint - min(Q1, Q2), team_active_mask)`
 
 There is one shared actor optimizer step per update call.
+
+For the actor update, gradients must flow from `min(Q1, Q2)` through the critic computation graph back into the sampled joint actions and then into the actor. The critic outputs must therefore not be detached. Instead, the implementation should temporarily freeze critic parameters during the actor step so the actor receives the correct policy gradient without updating critic weights.
 
 ### Alpha Update
 
