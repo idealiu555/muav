@@ -3,33 +3,27 @@ from marl_models.maddpg.agents import ActorNetwork, CriticNetwork
 from marl_models.buffer_and_helpers import soft_update, GaussianNoise, masked_mean
 import config
 import torch
-import torch.nn as nn
 import numpy as np
 import os
 
 
 class MADDPG(MARLModel):
+    CHECKPOINT_FORMAT = "shared_maddpg_vector_critic"
+    CHECKPOINT_VERSION = 1
+
     def __init__(self, model_name: str, num_agents: int, obs_dim: int, action_dim: int, device: str) -> None:
         super().__init__(model_name, num_agents, obs_dim, action_dim, device)
         self.total_obs_dim: int = num_agents * obs_dim
         self.total_action_dim: int = num_agents * action_dim
 
-        self.actors = nn.ModuleList(ActorNetwork(obs_dim, action_dim) for _ in range(num_agents)).to(device)
-        self.critics = nn.ModuleList(
-            CriticNetwork(self.total_obs_dim, self.total_action_dim) for _ in range(num_agents)
-        ).to(device)
-        self.target_actors = nn.ModuleList(ActorNetwork(obs_dim, action_dim) for _ in range(num_agents)).to(device)
-        self.target_critics = nn.ModuleList(
-            CriticNetwork(self.total_obs_dim, self.total_action_dim) for _ in range(num_agents)
-        ).to(device)
+        self.actor = ActorNetwork(obs_dim, action_dim).to(device)
+        self.critic = CriticNetwork(self.total_obs_dim, self.total_action_dim, num_agents).to(device)
+        self.target_actor = ActorNetwork(obs_dim, action_dim).to(device)
+        self.target_critic = CriticNetwork(self.total_obs_dim, self.total_action_dim, num_agents).to(device)
         self._init_target_networks()
 
-        self.actor_optimizers: list[torch.optim.AdamW] = [
-            torch.optim.AdamW(actor.parameters(), lr=config.ACTOR_LR) for actor in self.actors
-        ]
-        self.critic_optimizers: list[torch.optim.AdamW] = [
-            torch.optim.AdamW(critic.parameters(), lr=config.CRITIC_LR) for critic in self.critics
-        ]
+        self.actor_optimizer = torch.optim.AdamW(self.actor.parameters(), lr=config.ACTOR_LR)
+        self.critic_optimizer = torch.optim.AdamW(self.critic.parameters(), lr=config.CRITIC_LR)
 
         self.noise: list[GaussianNoise] = [GaussianNoise() for _ in range(num_agents)]
 
@@ -42,13 +36,33 @@ class MADDPG(MARLModel):
             for i in range(self.num_agents):
                 if obs_array[i, config.OWN_STATE_DIM - 1] < 0.5:
                     continue
-                action: torch.Tensor = self.actors[i](obs_tensor[i:i + 1]).squeeze(0)
+                action: torch.Tensor = self.actor(obs_tensor[i:i + 1]).squeeze(0)
                 action_np = action.cpu().numpy()
                 if exploration:
                     action_np = action_np + self.noise[i].sample()
                 actions[i] = np.clip(action_np, -1.0, 1.0)
 
         return actions
+
+    def _per_agent_bootstrap_mask(self, bootstrap_mask_tensor: torch.Tensor) -> torch.Tensor:
+        return bootstrap_mask_tensor
+
+    def _require_shape(self, tensor_name: str, tensor: torch.Tensor, expected_shape: torch.Size) -> None:
+        if tensor.shape != expected_shape:
+            raise ValueError(
+                f"Incompatible MADDPG tensor shape for {tensor_name}: "
+                f"expected {tuple(expected_shape)}, got {tuple(tensor.shape)}"
+            )
+
+    def _per_agent_targets(
+        self,
+        rewards_tensor: torch.Tensor,
+        target_q_value: torch.Tensor,
+        bootstrap_mask_tensor: torch.Tensor,
+    ) -> torch.Tensor:
+        self._require_shape("target_q_value", target_q_value, rewards_tensor.shape)
+        self._require_shape("bootstrap_mask_tensor", bootstrap_mask_tensor, rewards_tensor.shape)
+        return rewards_tensor + config.DISCOUNT_FACTOR * target_q_value * bootstrap_mask_tensor
 
     def update(self, batch: ExperienceBatch) -> dict:
         assert isinstance(batch, dict), "MADDPG expects OffPolicyExperienceBatch (dict)"
@@ -71,137 +85,140 @@ class MADDPG(MARLModel):
         next_obs_flat: torch.Tensor = next_obs_tensor.reshape(batch_size, -1)
         actions_flat: torch.Tensor = actions_tensor.reshape(batch_size, -1)
 
-        total_actor_loss: float = 0.0
-        total_critic_loss: float = 0.0
-        total_actor_grad_norm: float = 0.0
-        total_critic_grad_norm: float = 0.0
-        q_values: list[float] = []
-        updated_agents: int = 0
+        expected_q_shape = rewards_tensor.shape
+        self._require_shape("active_mask_tensor", active_mask_tensor, expected_q_shape)
+        self._require_shape("bootstrap_mask_tensor", bootstrap_mask_tensor, expected_q_shape)
+
+        per_agent_bootstrap_mask = self._per_agent_bootstrap_mask(bootstrap_mask_tensor)
 
         with torch.no_grad():
-            all_actions_detached = [
-                self.actors[i](obs_tensor[:, i, :]) * active_mask_tensor[:, i:i + 1]
-                for i in range(self.num_agents)
-            ]
             next_actions = [
-                self.target_actors[i](next_obs_tensor[:, i, :]) * bootstrap_mask_tensor[:, i:i + 1]
+                self.target_actor(next_obs_tensor[:, i, :]) * per_agent_bootstrap_mask[:, i:i + 1]
                 for i in range(self.num_agents)
             ]
             next_actions_tensor: torch.Tensor = torch.cat(next_actions, dim=1)
+            target_q_value = self.target_critic(next_obs_flat, next_actions_tensor)
+            self._require_shape("target_q_value", target_q_value, expected_q_shape)
+            y = self._per_agent_targets(rewards_tensor, target_q_value, per_agent_bootstrap_mask)
+            self._require_shape("y", y, expected_q_shape)
 
-        active_agent_indices = [
-            agent_idx for agent_idx in range(self.num_agents)
-            if active_mask_tensor[:, agent_idx].sum().item() > 0.0
+        current_q_value = self.critic(obs_flat, actions_flat)
+        self._require_shape("current_q_value", current_q_value, expected_q_shape)
+        critic_loss = masked_mean((current_q_value - y).pow(2), active_mask_tensor)
+        self.critic_optimizer.zero_grad(set_to_none=True)
+        critic_loss.backward()
+        critic_grad_norm = torch.nn.utils.clip_grad_norm_(self.critic.parameters(), config.MAX_GRAD_NORM)
+        self.critic_optimizer.step()
+
+        pred_actions = [
+            self.actor(obs_tensor[:, i, :]) * active_mask_tensor[:, i:i + 1]
+            for i in range(self.num_agents)
         ]
+        pred_actions_flat = torch.cat(pred_actions, dim=1)
 
-        for agent_idx in active_agent_indices:
-            valid_mask: torch.Tensor = active_mask_tensor[:, agent_idx:agent_idx + 1]
+        for param in self.critic.parameters():
+            param.requires_grad_(False)
+        actor_q = self.critic(obs_flat, pred_actions_flat)
+        self._require_shape("actor_q", actor_q, expected_q_shape)
+        actor_loss = -masked_mean(actor_q, active_mask_tensor)
+        self.actor_optimizer.zero_grad(set_to_none=True)
+        actor_loss.backward()
+        actor_grad_norm = torch.nn.utils.clip_grad_norm_(self.actor.parameters(), config.MAX_GRAD_NORM)
+        self.actor_optimizer.step()
+        for param in self.critic.parameters():
+            param.requires_grad_(True)
 
-            with torch.no_grad():
-                target_q_value: torch.Tensor = self.target_critics[agent_idx](next_obs_flat, next_actions_tensor)
-                agent_reward: torch.Tensor = rewards_tensor[:, agent_idx].unsqueeze(1)
-                agent_bootstrap: torch.Tensor = bootstrap_mask_tensor[:, agent_idx].unsqueeze(1)
-                y: torch.Tensor = agent_reward + config.DISCOUNT_FACTOR * target_q_value * agent_bootstrap
-
-            current_q_value: torch.Tensor = self.critics[agent_idx](obs_flat, actions_flat)
-            critic_loss: torch.Tensor = masked_mean((current_q_value - y).pow(2), valid_mask)
-            self.critic_optimizers[agent_idx].zero_grad(set_to_none=True)
-            critic_loss.backward()
-            critic_grad_norm = torch.nn.utils.clip_grad_norm_(
-                self.critics[agent_idx].parameters(),
-                config.MAX_GRAD_NORM,
-            )
-            self.critic_optimizers[agent_idx].step()
-
-            current_joint_actions: list[torch.Tensor] = []
-            for i in range(self.num_agents):
-                agent_active = active_mask_tensor[:, i:i + 1]
-                if i == agent_idx:
-                    action = self.actors[i](obs_tensor[:, i, :]) * agent_active
-                else:
-                    action = all_actions_detached[i]
-                current_joint_actions.append(action)
-
-            pred_actions_tensor: torch.Tensor = torch.stack(current_joint_actions, dim=1)
-            pred_actions_flat: torch.Tensor = pred_actions_tensor.reshape(batch_size, -1)
-
-            for param in self.critics[agent_idx].parameters():
-                param.requires_grad_(False)
-            actor_q: torch.Tensor = self.critics[agent_idx](obs_flat, pred_actions_flat)
-            actor_loss: torch.Tensor = -masked_mean(actor_q, valid_mask)
-            self.actor_optimizers[agent_idx].zero_grad(set_to_none=True)
-            actor_loss.backward()
-            actor_grad_norm = torch.nn.utils.clip_grad_norm_(
-                self.actors[agent_idx].parameters(),
-                config.MAX_GRAD_NORM,
-            )
-            self.actor_optimizers[agent_idx].step()
-            for param in self.critics[agent_idx].parameters():
-                param.requires_grad_(True)
-
-            total_actor_loss += actor_loss.item()
-            total_critic_loss += critic_loss.item()
-            total_actor_grad_norm += float(actor_grad_norm)
-            total_critic_grad_norm += float(critic_grad_norm)
-            q_values.extend(current_q_value[valid_mask.bool()].detach().cpu().numpy().flatten().tolist())
-            updated_agents += 1
-
-        for agent_idx in range(self.num_agents):
-            soft_update(self.target_actors[agent_idx], self.actors[agent_idx], config.UPDATE_FACTOR)
-            soft_update(self.target_critics[agent_idx], self.critics[agent_idx], config.UPDATE_FACTOR)
-
-        normalizer = max(1, updated_agents)
+        soft_update(self.target_actor, self.actor, config.UPDATE_FACTOR)
+        soft_update(self.target_critic, self.critic, config.UPDATE_FACTOR)
+        valid_q = current_q_value[active_mask_tensor.bool()]
         return {
-            "actor_loss": total_actor_loss / normalizer,
-            "critic_loss": total_critic_loss / normalizer,
-            "actor_grad_norm": total_actor_grad_norm / normalizer,
-            "critic_grad_norm": total_critic_grad_norm / normalizer,
-            "q_value_mean": float(np.mean(q_values)) if q_values else 0.0,
-            "q_value_std": float(np.std(q_values)) if q_values else 0.0,
+            "actor_loss": float(actor_loss.item()),
+            "critic_loss": float(critic_loss.item()),
+            "actor_grad_norm": float(actor_grad_norm),
+            "critic_grad_norm": float(critic_grad_norm),
+            "q_value_mean": float(valid_q.mean().item()) if valid_q.numel() else 0.0,
+            "q_value_std": float(valid_q.std(unbiased=False).item()) if valid_q.numel() else 0.0,
             "noise_scale": self.noise[0].scale,
         }
 
     def _init_target_networks(self) -> None:
-        for actor, target_actor in zip(self.actors, self.target_actors):
-            target_actor.load_state_dict(actor.state_dict())
-        for critic, target_critic in zip(self.critics, self.target_critics):
-            target_critic.load_state_dict(critic.state_dict())
+        self.target_actor.load_state_dict(self.actor.state_dict())
+        self.target_critic.load_state_dict(self.critic.state_dict())
 
     def reset(self) -> None:
         for n in self.noise:
             n.reset()
 
     def save(self, directory: str) -> None:
-        for i in range(self.num_agents):
-            torch.save(
-                {
-                    "actor": self.actors[i].state_dict(),
-                    "critic": self.critics[i].state_dict(),
-                    "target_actor": self.target_actors[i].state_dict(),
-                    "target_critic": self.target_critics[i].state_dict(),
-                    "actor_optimizer": self.actor_optimizers[i].state_dict(),
-                    "critic_optimizer": self.critic_optimizers[i].state_dict(),
-                    "noise_scale": self.noise[i].scale,
-                },
-                os.path.join(directory, f"agent_{i}.pth"),
-            )
+        torch.save(
+            {
+                "checkpoint_format": self.CHECKPOINT_FORMAT,
+                "checkpoint_version": self.CHECKPOINT_VERSION,
+                "num_agents": self.num_agents,
+                "actor_type": "shared",
+                "critic_type": "shared_vector",
+                "actor": self.actor.state_dict(),
+                "critic": self.critic.state_dict(),
+                "target_actor": self.target_actor.state_dict(),
+                "target_critic": self.target_critic.state_dict(),
+                "actor_optimizer": self.actor_optimizer.state_dict(),
+                "critic_optimizer": self.critic_optimizer.state_dict(),
+                "noise_scales": [noise.scale for noise in self.noise],
+            },
+            os.path.join(directory, "maddpg.pt"),
+        )
 
     def load(self, directory: str) -> None:
         if not os.path.exists(directory):
             raise FileNotFoundError(f"Model directory not found: {directory}")
 
-        for i in range(self.num_agents):
-            agent_path: str = os.path.join(directory, f"agent_{i}.pth")
-            if not os.path.exists(agent_path):
-                raise FileNotFoundError(f"Model file not found: {agent_path}")
-            checkpoint: dict = torch.load(agent_path, map_location=self.device)
+        checkpoint_path = os.path.join(directory, "maddpg.pt")
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Shared MADDPG checkpoint not found: {checkpoint_path}")
 
-            self.actors[i].load_state_dict(checkpoint["actor"])
-            self.critics[i].load_state_dict(checkpoint["critic"])
-            self.target_actors[i].load_state_dict(checkpoint["target_actor"])
-            self.target_critics[i].load_state_dict(checkpoint["target_critic"])
-            self.actor_optimizers[i].load_state_dict(checkpoint["actor_optimizer"])
-            self.critic_optimizers[i].load_state_dict(checkpoint["critic_optimizer"])
+        checkpoint: dict = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint_format = checkpoint.get("checkpoint_format")
+        checkpoint_version = checkpoint.get("checkpoint_version")
+        checkpoint_num_agents = checkpoint.get("num_agents")
+        actor_type = checkpoint.get("actor_type")
+        critic_type = checkpoint.get("critic_type")
 
-            if "noise_scale" in checkpoint:
-                self.noise[i].scale = checkpoint["noise_scale"]
+        if checkpoint_format != self.CHECKPOINT_FORMAT:
+            raise ValueError(
+                "Incompatible MADDPG checkpoint format: "
+                f"expected '{self.CHECKPOINT_FORMAT}', got {checkpoint_format!r}"
+            )
+        if checkpoint_version != self.CHECKPOINT_VERSION:
+            raise ValueError(
+                "Incompatible MADDPG checkpoint version: "
+                f"expected {self.CHECKPOINT_VERSION}, got {checkpoint_version!r}"
+            )
+        if checkpoint_num_agents != self.num_agents:
+            raise ValueError(
+                "Incompatible MADDPG checkpoint agent count: "
+                f"expected {self.num_agents}, got {checkpoint_num_agents!r}"
+            )
+        if actor_type != "shared" or critic_type != "shared_vector":
+            raise ValueError(
+                "Incompatible MADDPG checkpoint architecture: "
+                f"expected shared actor/shared vector critic, got actor_type={actor_type!r}, "
+                f"critic_type={critic_type!r}"
+            )
+
+        noise_scales = checkpoint.get("noise_scales")
+        if noise_scales is None:
+            raise ValueError("Incompatible MADDPG checkpoint: missing noise_scales")
+        if len(noise_scales) != self.num_agents:
+            raise ValueError(
+                "Incompatible MADDPG checkpoint noise_scales length: "
+                f"expected {self.num_agents}, got {len(noise_scales)}"
+            )
+
+        self.actor.load_state_dict(checkpoint["actor"])
+        self.critic.load_state_dict(checkpoint["critic"])
+        self.target_actor.load_state_dict(checkpoint["target_actor"])
+        self.target_critic.load_state_dict(checkpoint["target_critic"])
+        self.actor_optimizer.load_state_dict(checkpoint["actor_optimizer"])
+        self.critic_optimizer.load_state_dict(checkpoint["critic_optimizer"])
+        for noise, scale in zip(self.noise, noise_scales):
+            noise.scale = scale

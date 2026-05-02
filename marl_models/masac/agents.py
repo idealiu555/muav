@@ -110,17 +110,23 @@ class AttentionActorNetwork(nn.Module):
 
 
 class CriticNetwork(nn.Module):
-    def __init__(self, total_obs_dim: int, total_action_dim: int) -> None:
+    def __init__(self, total_obs_dim: int, total_action_dim: int, num_agents: int) -> None:
         super(CriticNetwork, self).__init__()
+        self.total_obs_dim = total_obs_dim
+        self.total_action_dim = total_action_dim
         self.fc1: nn.Linear = layer_init(nn.Linear(total_obs_dim + total_action_dim, config.MLP_HIDDEN_DIM))
         self.ln1: nn.LayerNorm = nn.LayerNorm(config.MLP_HIDDEN_DIM)
         self.act1: nn.SiLU = nn.SiLU()
         self.fc2: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, config.MLP_HIDDEN_DIM))
         self.ln2: nn.LayerNorm = nn.LayerNorm(config.MLP_HIDDEN_DIM)
         self.act2: nn.SiLU = nn.SiLU()
-        self.out: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, 1))
+        self.out: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, num_agents))
 
     def forward(self, joint_obs: torch.Tensor, joint_action: torch.Tensor) -> torch.Tensor:
+        _validate_rank("joint_obs", joint_obs, 2)
+        _validate_rank("joint_action", joint_action, 2)
+        _validate_trailing_dim("joint_obs", joint_obs, self.total_obs_dim)
+        _validate_trailing_dim("joint_action", joint_action, self.total_action_dim)
         x: torch.Tensor = torch.cat([joint_obs, joint_action], dim=1)
         x = self.act1(self.ln1(self.fc1(x)))
         x = self.act2(self.ln2(self.fc2(x)))
@@ -144,7 +150,7 @@ class AttentionCriticNetwork(nn.Module):
         self.fc2: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, config.MLP_HIDDEN_DIM))
         self.ln2: nn.LayerNorm = nn.LayerNorm(config.MLP_HIDDEN_DIM)
         self.act2: nn.SiLU = nn.SiLU()
-        self.out: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, 1))
+        self.out: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, num_agents))
 
     def forward(self, joint_obs: torch.Tensor, joint_action: torch.Tensor) -> torch.Tensor:
         _validate_rank("joint_obs", joint_obs, 2)

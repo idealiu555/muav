@@ -29,7 +29,7 @@ class ActorNetwork(nn.Module):
 
 
 class CriticNetwork(nn.Module):
-    def __init__(self, total_obs_dim: int, total_action_dim: int) -> None:
+    def __init__(self, total_obs_dim: int, total_action_dim: int, num_agents: int) -> None:
         super().__init__()
         self.fc1 = layer_init(nn.Linear(total_obs_dim + total_action_dim, config.MLP_HIDDEN_DIM))
         self.ln1 = nn.LayerNorm(config.MLP_HIDDEN_DIM)
@@ -37,7 +37,7 @@ class CriticNetwork(nn.Module):
         self.fc2 = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, config.MLP_HIDDEN_DIM))
         self.ln2 = nn.LayerNorm(config.MLP_HIDDEN_DIM)
         self.act2 = nn.SiLU()
-        self.out = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, 1))
+        self.out = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, num_agents))
 
     def forward(self, joint_obs: torch.Tensor, joint_action: torch.Tensor) -> torch.Tensor:
         x = torch.cat([joint_obs, joint_action], dim=1)
