@@ -69,8 +69,8 @@ obs_i
 share_obs
   -> reshape([batch, N, obs_dim])
   -> per-agent AttentionEncoder
-  -> agent_encodings [batch, N, 256]
-  -> flatten(team_context) [batch, N*256]
+  -> agent_encodings [batch, N, encoder.output_dim]
+  -> flatten(team_context) [batch, N*encoder.output_dim]
   -> LayerNorm(team_context)
   -> broadcast 到每个 agent
   -> concat(team_context, e_i)
@@ -95,7 +95,8 @@ flat obs
   -> NeighborEmbedding       -> [batch, max_neighbors, 64]
   -> UE CrossAttention       -> [batch, 128]
   -> Neighbor CrossAttention -> [batch, 64]
-  -> concat                  -> [batch, 256]
+  -> masked raw shortcut     -> [batch, 128]
+  -> concat                  -> [batch, 384]
 ```
 
 默认维度：
@@ -103,8 +104,10 @@ flat obs
 - UAV embedding: `64`
 - UE embedding: `128`
 - Neighbor output: `64`
-- Encoder output: `256`
+- Masked raw shortcut: `128`
+- Encoder output: `384`
 - Attention heads: `2`
+- Attention layers per entity branch: `2`
 
 ## 5. Mask 机制
 

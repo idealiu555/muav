@@ -54,8 +54,24 @@ def test_attention_encoder_outputs_expected_shape_for_zero_count_obs() -> None:
 def test_attention_encoder_uses_configured_attention_blocks_per_entity_branch() -> None:
     encoder = AttentionEncoder()
 
+    assert config.ATTENTION_NUM_LAYERS == 2
     assert len(encoder.ue_attention_blocks) == config.ATTENTION_NUM_LAYERS
     assert len(encoder.neighbor_attention_blocks) == config.ATTENTION_NUM_LAYERS
+
+
+def test_attention_encoder_appends_masked_raw_shortcut() -> None:
+    encoder = AttentionEncoder()
+    obs = _make_obs_batch(batch_size=2)
+
+    encoded = encoder(obs)
+    expected_base_dim = (
+        config.ATTENTION_UAV_EMBED_DIM
+        + config.ATTENTION_EMBED_DIM
+        + config.ATTENTION_NEIGHBOR_DIM
+    )
+
+    assert encoder.output_dim == expected_base_dim + config.ATTENTION_RAW_SHORTCUT_DIM
+    assert tuple(encoded[:, expected_base_dim:].shape) == (2, config.ATTENTION_RAW_SHORTCUT_DIM)
 
 
 def test_attention_encoder_zero_count_obs_zeroes_entity_summary_slices() -> None:

@@ -63,8 +63,9 @@ USE_ATTENTION: bool = False  # 是否使用注意力机制处理可变长度 UE 
 ATTENTION_EMBED_DIM: int = 128  # UE 注意力的 embedding 维度 (heads=2, head_dim=64)
 ATTENTION_UAV_EMBED_DIM: int = 64  # UAV 状态的 embedding 维度
 ATTENTION_NEIGHBOR_DIM: int = 64  # Neighbor 注意力输出维度 (heads=2, head_dim=32)
+ATTENTION_RAW_SHORTCUT_DIM: int = 128  # masked raw observation shortcut dimension
 ATTENTION_NUM_HEADS: int = 2  # 多头注意力的头数
-ATTENTION_NUM_LAYERS: int = 4  # 每个实体分支的残差 cross-attention 层数
+ATTENTION_NUM_LAYERS: int = 2  # 每个实体分支的残差 cross-attention 层数
 
 POWER_MOVE: float = 60.0  # P_move in Watts
 POWER_HOVER: float = 40.0  # P_hover in Watts
@@ -150,7 +151,7 @@ NEIGHBOR_STATE_DIM: int = 3 + NUM_FILES + 3  # 26 dims
 # - 基础部分: uav_state + neighbors + ues
 # - 额外字段: neighbor_count(1) + ue_count(1)，用于 attention mask 或无 attention 的均值池化
 # OBS_DIM: 24+4*26+1+50*5+1 = 380
-# 编码器输出维度：UAV(64) + UE_attn(128) + Neighbor_attn(64) = 256 ≈ OBS_DIM(380)
+# 编码器输出维度：UAV(64) + UE_attn(128) + Neighbor_attn(64) + raw_shortcut(128) = 384
 _OBS_BASE_DIM: int = (OWN_STATE_DIM +
                       MAX_UAV_NEIGHBORS * NEIGHBOR_STATE_DIM +
                       MAX_ASSOCIATED_UES * UE_STATE_DIM)
