@@ -72,7 +72,7 @@ def test_non_attention_actor_outputs_distribution_from_raw_obs() -> None:
     assert isinstance(actor.policy.activation, torch.nn.SiLU)
 
 
-def test_attention_critic_outputs_team_scalar_values() -> None:
+def test_attention_critic_outputs_one_value_per_agent() -> None:
     from marl_models.mappo.agents import AttentionCriticNetwork
 
     critic = AttentionCriticNetwork(config.NUM_UAVS, config.OBS_DIM_SINGLE)
@@ -89,10 +89,10 @@ def test_attention_critic_outputs_team_scalar_values() -> None:
     assert not hasattr(critic, "agent_pooling")
     assert critic.value_head.fc1.in_features == config.NUM_UAVS * critic.encoder.output_dim
     assert not hasattr(critic, "conditioner")
-    assert tuple(values.shape) == (2,)
+    assert tuple(values.shape) == (2, config.NUM_UAVS)
 
 
-def test_critic_accepts_flattened_share_obs_and_returns_scalar_values() -> None:
+def test_critic_accepts_flattened_share_obs_and_returns_vector_values() -> None:
     from marl_models.mappo.agents import CriticNetwork
 
     critic = CriticNetwork(config.NUM_UAVS, config.OBS_DIM_SINGLE)
@@ -100,7 +100,7 @@ def test_critic_accepts_flattened_share_obs_and_returns_scalar_values() -> None:
 
     values = critic(share_obs)
 
-    assert tuple(values.shape) == (4,)
+    assert tuple(values.shape) == (4, config.NUM_UAVS)
     assert critic.value_head.fc1.in_features == config.NUM_UAVS * config.OBS_DIM_SINGLE
     assert critic.value_head.input_norm.normalized_shape == (config.NUM_UAVS * config.OBS_DIM_SINGLE,)
     assert critic.value_head.fc3.out_features == config.MLP_HIDDEN_DIM
@@ -152,6 +152,19 @@ def test_mappo_constructor_selects_attention_and_non_attention_branches(monkeypa
     assert tuple(values.shape) == (config.NUM_UAVS,)
 
 
+def test_mappo_uses_algorithm_specific_actor_lr(monkeypatch) -> None:
+    monkeypatch.setattr(config, "USE_ATTENTION", False)
+    model = MAPPO(
+        model_name="mappo",
+        num_agents=config.NUM_UAVS,
+        obs_dim=config.OBS_DIM_SINGLE,
+        action_dim=config.ACTION_DIM,
+        device="cpu",
+    )
+
+    assert model.actor_optimizer.defaults["lr"] == config.MAPPO_ACTOR_LR
+
+
 def test_mappo_get_action_and_value_flattens_share_obs_for_critic(monkeypatch) -> None:
     obs = _fake_obs()
     expected_shape = (1, config.NUM_UAVS * config.OBS_DIM_SINGLE)
@@ -198,7 +211,7 @@ def test_critics_accept_flattened_share_obs_for_both_branches() -> None:
     for critic_cls in (CriticNetwork, AttentionCriticNetwork):
         critic = critic_cls(config.NUM_UAVS, config.OBS_DIM_SINGLE)
         values = critic(share_obs)
-        assert tuple(values.shape) == (3,)
+        assert tuple(values.shape) == (3, config.NUM_UAVS)
 
 
 def test_rollout_buffer_emits_share_obs_per_flat_sample() -> None:
@@ -236,7 +249,7 @@ def test_rollout_buffer_emits_share_obs_per_flat_sample() -> None:
     for batch in buffer.get_batches(4):
         assert "share_obs" in batch
         assert "obs" in batch
-        assert "agent_index" not in batch
+        assert "agent_index" in batch
         assert tuple(batch["share_obs"].shape) == (
             batch["obs"].shape[0],
             config.NUM_UAVS * config.OBS_DIM_SINGLE,
@@ -244,6 +257,7 @@ def test_rollout_buffer_emits_share_obs_per_flat_sample() -> None:
         for sample_idx in range(batch["obs"].shape[0]):
             share_obs = batch["share_obs"][sample_idx]
             flat_obs = batch["obs"][sample_idx]
+            batch_agent_index = int(batch["agent_index"][sample_idx].item())
             agent_index = None
             expected_step = None
             for step, expected in enumerate(expected_share_obs):
@@ -260,12 +274,13 @@ def test_rollout_buffer_emits_share_obs_per_flat_sample() -> None:
             if expected_step is None or agent_index is None:
                 raise AssertionError("share_obs or obs did not match either stored timestep")
             else:
+                assert batch_agent_index == agent_index
                 seen_pairs.add((expected_step, agent_index))
 
     assert len(seen_pairs) == 2 * config.NUM_UAVS
 
 
-def test_mappo_rollout_replicates_scalar_value_across_agents(monkeypatch) -> None:
+def test_mappo_rollout_uses_vector_value_outputs(monkeypatch) -> None:
     obs = _fake_obs()
 
     for use_attention in (False, True):
@@ -282,14 +297,14 @@ def test_mappo_rollout_replicates_scalar_value_across_agents(monkeypatch) -> Non
 
         def wrapped_forward(share_obs: torch.Tensor) -> torch.Tensor:
             assert tuple(share_obs.shape) == (1, config.NUM_UAVS * config.OBS_DIM_SINGLE)
-            return torch.tensor([7.5], dtype=torch.float32, device=share_obs.device)
+            return torch.arange(config.NUM_UAVS, dtype=torch.float32, device=share_obs.device).unsqueeze(0)
 
         model.critics.forward = wrapped_forward  # type: ignore[method-assign]
         _env_actions, _raw_actions, _log_probs, values = model.get_action_and_value(obs)
         model.critics.forward = original_forward  # type: ignore[method-assign]
 
         assert tuple(values.shape) == (config.NUM_UAVS,)
-        assert np.allclose(values, 7.5)
+        assert np.allclose(values, np.arange(config.NUM_UAVS, dtype=np.float32))
 
 def test_mappo_update_minibatch_uses_share_obs(monkeypatch) -> None:
     torch.manual_seed(7)
@@ -311,6 +326,7 @@ def test_mappo_update_minibatch_uses_share_obs(monkeypatch) -> None:
         batch = {
             "obs": torch.from_numpy(obs),
             "share_obs": torch.from_numpy(np.repeat(share_obs[None, :], batch_size, axis=0)),
+            "agent_index": torch.arange(config.NUM_UAVS, dtype=torch.long),
             "raw_actions": torch.from_numpy(raw_actions),
             "old_log_probs": torch.from_numpy(log_probs),
             "advantages": torch.full((batch_size,), 0.25, dtype=torch.float32),
@@ -347,6 +363,7 @@ def test_mappo_critic_loss_uses_value_normalizer(monkeypatch) -> None:
     batch = {
         "obs": torch.from_numpy(obs),
         "share_obs": torch.from_numpy(np.repeat(share_obs[None, :], config.NUM_UAVS, axis=0)),
+        "agent_index": torch.arange(config.NUM_UAVS, dtype=torch.long),
         "raw_actions": torch.from_numpy(raw_actions),
         "old_log_probs": torch.from_numpy(log_probs),
         "advantages": torch.full((config.NUM_UAVS,), 0.25, dtype=torch.float32),

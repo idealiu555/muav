@@ -40,7 +40,7 @@ class MASAC(MARLModel):
         self._init_target_networks()
         self._set_target_critic_grads(enabled=False)
 
-        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=config.ACTOR_LR, weight_decay=0.0)
+        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=config.MASAC_ACTOR_LR, weight_decay=0.0)
         self.critic_1_optimizer = torch.optim.Adam(self.critic_1.parameters(), lr=config.CRITIC_LR, weight_decay=0.0)
         self.critic_2_optimizer = torch.optim.Adam(self.critic_2.parameters(), lr=config.CRITIC_LR, weight_decay=0.0)
         self.target_entropy_per_agent: float = -float(action_dim) * config.TARGET_ENTROPY_SCALE

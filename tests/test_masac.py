@@ -148,6 +148,7 @@ def test_masac_uses_adam_without_weight_decay() -> None:
     ]
     assert all(isinstance(optimizer, torch.optim.Adam) for optimizer in optimizers)
     assert all(optimizer.defaults["weight_decay"] == 0.0 for optimizer in optimizers)
+    assert model.actor_optimizer.defaults["lr"] == config.MASAC_ACTOR_LR
 
 
 def test_masac_update_reports_current_alpha_mean() -> None:

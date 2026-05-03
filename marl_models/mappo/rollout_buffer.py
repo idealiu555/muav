@@ -152,6 +152,7 @@ class MAPPORolloutBuffer:
 
         obs_flat = self.observations[:num_steps].reshape(num_samples, self.obs_dim)
         share_obs_flat = self.share_obs[:num_steps].repeat_interleave(self.num_agents, dim=0)
+        agent_indices_flat = torch.arange(self.num_agents, device=self.storage_device).repeat(num_steps)
         raw_actions_flat = self.raw_actions[:num_steps].reshape(num_samples, self.action_dim)
         log_probs_flat = self.log_probs[:num_steps].reshape(num_samples)
         advantages_flat = self.advantages[:num_steps].reshape(num_samples)
@@ -165,6 +166,7 @@ class MAPPORolloutBuffer:
             yield {
                 "obs": self._to_train_device(obs_flat[batch_indices]),
                 "share_obs": self._to_train_device(share_obs_flat[batch_indices]),
+                "agent_index": self._to_train_device(agent_indices_flat[batch_indices]),
                 "raw_actions": self._to_train_device(raw_actions_flat[batch_indices]),
                 "old_log_probs": self._to_train_device(log_probs_flat[batch_indices]),
                 "advantages": self._to_train_device(advantages_flat[batch_indices]),

@@ -167,6 +167,9 @@ ACTION_DIM: int = 5 if BEAM_CONTROL_ENABLED else 3  # [dx, dy, dz] 或 [dx, dy, 
 MLP_HIDDEN_DIM: int = 768  # shared hidden width for actor/critic MLP blocks
 
 ACTOR_LR: float = 1e-4
+MADDPG_ACTOR_LR: float = 5e-5
+MAPPO_ACTOR_LR: float = 5e-5
+MASAC_ACTOR_LR: float = ACTOR_LR
 CRITIC_LR: float = 2e-4
 DISCOUNT_FACTOR: float = 0.99  # gamma
 UPDATE_FACTOR: float = 0.001  # tau
@@ -183,8 +186,8 @@ LEARN_FREQ: int = 10  # steps to learn after
 
 # Gaussian Noise Parameters (for MADDPG and MATD3)
 INITIAL_NOISE_SCALE: float = 0.2
-MIN_NOISE_SCALE: float = 0.02
-NOISE_DECAY_RATE: float = 0.995
+MIN_NOISE_SCALE: float = 0.05
+NOISE_DECAY_RATE: float = 0.997
 BEAM_NOISE_RATIO: float = 0.5  # 波束动作噪声相对于位移动作噪声的比例
 
 # MATD3 Specific Hyperparameters
@@ -194,12 +197,12 @@ NOISE_CLIP: float = 0.5  # range to clip target policy smoothing noise
 
 # MAPPO Specific Hyperparameters
 PPO_ROLLOUT_LENGTH: int = 1000  # number of steps to collect per rollout (Set to STEPS_PER_EPISODE for episodic tasks)
-PPO_EPOCHS: int = 10  # number of epochs to run on the collected rollout data (aligned with official MAPPO best practices)
+PPO_EPOCHS: int = 6  # number of epochs to run on the collected rollout data (aligned with official MAPPO best practices)
 PPO_BATCH_SIZE: int = 512  # size of mini-batches to use during the update step (increased from 64 for better GPU utilization)
 PPO_CLIP_EPS: float = 0.2  # clipping parameter (epsilon) for the PPO surrogate objective
 PPO_VALUE_CLIP_EPS: float = 0.2  # clipping parameter for value function (can be same or different from policy clip)
-PPO_ENTROPY_COEF_START: float = 0.01  # initial entropy coefficient (decays over training to prevent entropy explosion)
-PPO_ENTROPY_COEF_END: float = 0.01  # final entropy coefficient
+PPO_ENTROPY_COEF_START: float = 0.02  # initial entropy coefficient (decays over training to prevent entropy explosion)
+PPO_ENTROPY_COEF_END: float = 0.02  # final entropy coefficient
 PPO_ENTROPY_MC_SAMPLES: int = 8  # Monte Carlo samples for squashed-policy entropy estimation
 PPO_GAE_LAMBDA: float = 0.95  # GAE lambda for lower-variance advantage estimation
 PPO_MAX_LOG_RATIO: float = 10.0  # clip log-ratio before exp to avoid numerical spikes

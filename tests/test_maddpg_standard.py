@@ -104,6 +104,12 @@ def test_maddpg_registers_shared_modules_in_state_dict() -> None:
     assert "target_critic.fc1.weight" in state_dict_keys
 
 
+def test_maddpg_uses_algorithm_specific_actor_lr() -> None:
+    model = MADDPG("maddpg", num_agents=2, obs_dim=8, action_dim=2, device="cpu")
+
+    assert model.actor_optimizer.defaults["lr"] == config.MADDPG_ACTOR_LR
+
+
 def test_maddpg_preserves_per_agent_reward_columns() -> None:
     model = MADDPG("maddpg", num_agents=2, obs_dim=8, action_dim=2, device="cpu")
     rewards_tensor = torch.tensor(

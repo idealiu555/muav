@@ -22,7 +22,7 @@ class MADDPG(MARLModel):
         self.target_critic = CriticNetwork(self.total_obs_dim, self.total_action_dim, num_agents).to(device)
         self._init_target_networks()
 
-        self.actor_optimizer = torch.optim.AdamW(self.actor.parameters(), lr=config.ACTOR_LR)
+        self.actor_optimizer = torch.optim.AdamW(self.actor.parameters(), lr=config.MADDPG_ACTOR_LR)
         self.critic_optimizer = torch.optim.AdamW(self.critic.parameters(), lr=config.CRITIC_LR)
 
         self.noise: list[GaussianNoise] = [GaussianNoise() for _ in range(num_agents)]

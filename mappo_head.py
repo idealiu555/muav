@@ -32,7 +32,7 @@ class MAPPO(MARLModel):
         self.critics = critic_cls(num_agents, obs_dim).to(device)
 
         # Create optimizers
-        self.actor_optimizer: torch.optim.AdamW = torch.optim.AdamW(self.actors.parameters(), lr=config.MAPPO_ACTOR_LR)
+        self.actor_optimizer: torch.optim.AdamW = torch.optim.AdamW(self.actors.parameters(), lr=config.ACTOR_LR)
         self.critic_optimizer: torch.optim.AdamW = torch.optim.AdamW(self.critics.parameters(), lr=config.CRITIC_LR)
         self.entropy_coef: float = config.PPO_ENTROPY_COEF_START
         self.entropy_mc_samples: int = config.PPO_ENTROPY_MC_SAMPLES
@@ -194,25 +194,26 @@ class MAPPO(MARLModel):
         ) * progress
 
     def _critic_values_for_rollout(self, critic_output: torch.Tensor) -> torch.Tensor:
-        if critic_output.ndim == 2 and critic_output.shape == (1, self.num_agents):
+        if critic_output.ndim == 1:
+            if critic_output.shape[0] == 1:
+                return critic_output.repeat(self.num_agents)
+            if critic_output.shape[0] == self.num_agents:
+                return critic_output
+        elif critic_output.ndim == 2 and critic_output.shape == (1, self.num_agents):
             return critic_output.squeeze(0)
         raise ValueError(
             f"Unexpected critic rollout output shape {tuple(critic_output.shape)}; "
-            f"expected (1, {self.num_agents})"
+            f"expected (1,), ({self.num_agents},), or (1, {self.num_agents})"
         )
 
-    def _critic_values_for_batch(self, critic_output: torch.Tensor, agent_index: torch.Tensor) -> torch.Tensor:
-        if critic_output.ndim == 2 and critic_output.shape[1] == self.num_agents:
-            if agent_index.ndim != 1 or agent_index.shape[0] != critic_output.shape[0]:
-                raise ValueError(
-                    f"Expected agent_index shape ({critic_output.shape[0]},), got {tuple(agent_index.shape)}"
-                )
-            if agent_index.dtype != torch.long:
-                agent_index = agent_index.long()
-            return critic_output.gather(1, agent_index.unsqueeze(1)).squeeze(1)
+    def _critic_values_for_batch(self, critic_output: torch.Tensor) -> torch.Tensor:
+        if critic_output.ndim == 1:
+            return critic_output
+        if critic_output.ndim == 2 and critic_output.shape[1] == 1:
+            return critic_output.squeeze(1)
         raise ValueError(
             f"Unexpected critic batch output shape {tuple(critic_output.shape)}; "
-            f"expected (batch, {self.num_agents})"
+            "expected (batch,) or (batch, 1)"
         )
 
     def _update_minibatch(self, batch: dict[str, torch.Tensor]) -> dict:
@@ -223,7 +224,6 @@ class MAPPO(MARLModel):
         advantages_batch: torch.Tensor = batch["advantages"]
         returns_batch: torch.Tensor = batch["returns"]
         share_obs_batch: torch.Tensor = batch["share_obs"]
-        agent_index_batch: torch.Tensor = batch["agent_index"]
         old_values_batch: torch.Tensor = batch["old_values"]
         active_mask_batch: torch.Tensor = batch["active_mask"]
         actor_mask: torch.Tensor = active_mask_batch.float()
@@ -264,7 +264,7 @@ class MAPPO(MARLModel):
 
         # Critic Loss (masked)
         critic_output: torch.Tensor = self.critics(share_obs_batch)
-        values: torch.Tensor = self._critic_values_for_batch(critic_output, agent_index_batch)
+        values: torch.Tensor = self._critic_values_for_batch(critic_output)
         values_clipped: torch.Tensor = old_values_batch + torch.clamp(values - old_values_batch, -config.PPO_VALUE_CLIP_EPS, config.PPO_VALUE_CLIP_EPS)
         active_indices = actor_mask > 0.5
         if active_indices.any():

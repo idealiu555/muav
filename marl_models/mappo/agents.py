@@ -58,8 +58,8 @@ class _GaussianPolicyHead(nn.Module):
         return Normal(mean, std)
 
 
-class _ScalarValueHead(nn.Module):
-    def __init__(self, context_dim: int) -> None:
+class _VectorValueHead(nn.Module):
+    def __init__(self, context_dim: int, num_agents: int) -> None:
         super().__init__()
         self.input_norm: nn.LayerNorm = nn.LayerNorm(context_dim)
         self.fc1: nn.Linear = layer_init(nn.Linear(context_dim, config.MLP_HIDDEN_DIM))
@@ -69,14 +69,14 @@ class _ScalarValueHead(nn.Module):
         self.fc3: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, config.MLP_HIDDEN_DIM))
         self.ln3: nn.LayerNorm = nn.LayerNorm(config.MLP_HIDDEN_DIM)
         self.activation: nn.SiLU = nn.SiLU()
-        self.out: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, 1), std=1.0)
+        self.out: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, num_agents), std=1.0)
 
     def forward(self, context: torch.Tensor) -> torch.Tensor:
         x: torch.Tensor = self.input_norm(context)
         x = self.ln1(self.activation(self.fc1(x)))
         x = self.ln2(self.activation(self.fc2(x)))
         x = self.ln3(self.activation(self.fc3(x)))
-        return self.out(x).squeeze(-1)
+        return self.out(x)
 
 
 class ActorNetwork(nn.Module):
@@ -106,7 +106,7 @@ class CriticNetwork(nn.Module):
         self.num_agents = num_agents
         self.obs_dim = obs_dim
         self.share_obs_dim = num_agents * obs_dim
-        self.value_head = _ScalarValueHead(self.share_obs_dim)
+        self.value_head = _VectorValueHead(self.share_obs_dim, num_agents)
 
     def forward(self, share_obs: torch.Tensor) -> torch.Tensor:
         _validate_share_obs(share_obs, self.num_agents, self.obs_dim)
@@ -121,7 +121,7 @@ class AttentionCriticNetwork(nn.Module):
         self.obs_dim = obs_dim
         self.encoder = AttentionEncoder()
         self.encoded_share_obs_dim = num_agents * self.encoder.output_dim
-        self.value_head = _ScalarValueHead(self.encoded_share_obs_dim)
+        self.value_head = _VectorValueHead(self.encoded_share_obs_dim, num_agents)
 
     def forward(self, share_obs: torch.Tensor) -> torch.Tensor:
         joint_obs = _reshape_share_obs(share_obs, self.num_agents, self.obs_dim)
