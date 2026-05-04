@@ -28,8 +28,8 @@ def _validate_rank(name: str, tensor: torch.Tensor, expected_rank: int) -> None:
 
 
 def _validate_trailing_dim(name: str, tensor: torch.Tensor, expected_dim: int) -> None:
-    if tensor.shape[1] != expected_dim:
-        raise ValueError(f"{name} trailing dim must be {expected_dim}, got {tensor.shape[1]}.")
+    if tensor.shape[-1] != expected_dim:
+        raise ValueError(f"{name} trailing dim must be {expected_dim}, got {tensor.shape[-1]}.")
 
 
 class ActorNetwork(nn.Module):
@@ -133,7 +133,9 @@ class CriticNetwork(nn.Module):
         return self.out(x)
 
 
-class AttentionCriticNetwork(nn.Module):
+class LocalAttentionCriticNetwork(nn.Module):
+    """Critic with per-agent local entity encoding, flattened concat, and MLP — no agent self-attention."""
+
     def __init__(self, num_agents: int, obs_dim: int, action_dim: int) -> None:
         super().__init__()
         _validate_attention_obs_dim(obs_dim)
@@ -166,3 +168,138 @@ class AttentionCriticNetwork(nn.Module):
         x = self.act1(self.ln1(self.fc1(x)))
         x = self.act2(self.ln2(self.fc2(x)))
         return self.out(x)
+
+
+class AgentSelfAttentionBlock(nn.Module):
+    """Pre-LN residual self-attention block for agent-level attention."""
+
+    def __init__(self, dim: int, num_heads: int, ffn_mult: int) -> None:
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
+        self.norm2 = nn.LayerNorm(dim)
+        self.ffn = nn.Sequential(
+            layer_init(nn.Linear(dim, dim * ffn_mult)),
+            nn.SiLU(),
+            layer_init(nn.Linear(dim * ffn_mult, dim)),
+        )
+
+    def forward(self, x: torch.Tensor, key_padding_mask: torch.Tensor | None = None) -> torch.Tensor:
+        y = self.norm1(x)
+        y, _ = self.attn(y, y, y, key_padding_mask=key_padding_mask, need_weights=False)
+        x = x + y
+        z = self.norm2(x)
+        x = x + self.ffn(z)
+        return x
+
+
+class AgentSelfAttentionCriticNetwork(nn.Module):
+    """MASAC critic with agent-level self-attention over per-UAV tokens.
+
+    Encodes each agent's local observation via a shared AttentionEncoder, builds
+    per-agent tokens from local encoding + action + learned agent-id embedding, applies
+    masked agent-level self-attention, and outputs per-agent Q values through a shared
+    Q head with skip connections for h_i and a_i.
+    """
+
+    def __init__(self, num_agents: int, obs_dim: int, action_dim: int) -> None:
+        super().__init__()
+        _validate_attention_obs_dim(obs_dim)
+        if config.MASAC_AGENT_ATTENTION_DIM % config.MASAC_AGENT_ATTENTION_HEADS != 0:
+            raise ValueError(
+                f"MASAC_AGENT_ATTENTION_DIM ({config.MASAC_AGENT_ATTENTION_DIM}) "
+                f"must be divisible by MASAC_AGENT_ATTENTION_HEADS ({config.MASAC_AGENT_ATTENTION_HEADS})"
+            )
+        if config.MASAC_AGENT_ID_DIM <= 0:
+            raise ValueError(f"MASAC_AGENT_ID_DIM must be > 0, got {config.MASAC_AGENT_ID_DIM}")
+        if config.MASAC_AGENT_ATTENTION_LAYERS < 1:
+            raise ValueError(f"MASAC_AGENT_ATTENTION_LAYERS must be >= 1, got {config.MASAC_AGENT_ATTENTION_LAYERS}")
+
+        self.num_agents = num_agents
+        self.obs_dim = obs_dim
+        self.action_dim = action_dim
+
+        self.encoder = AttentionEncoder()
+        self.agent_id_embedding = nn.Embedding(num_agents, config.MASAC_AGENT_ID_DIM)
+
+        token_input_dim = self.encoder.output_dim + action_dim + config.MASAC_AGENT_ID_DIM
+        self.token_projection = nn.Sequential(
+            layer_init(nn.Linear(token_input_dim, config.MASAC_AGENT_ATTENTION_DIM)),
+            nn.LayerNorm(config.MASAC_AGENT_ATTENTION_DIM),
+        )
+
+        self.attention_blocks = nn.ModuleList([
+            AgentSelfAttentionBlock(
+                config.MASAC_AGENT_ATTENTION_DIM,
+                config.MASAC_AGENT_ATTENTION_HEADS,
+                config.MASAC_AGENT_ATTENTION_FFN_MULT,
+            )
+            for _ in range(config.MASAC_AGENT_ATTENTION_LAYERS)
+        ])
+
+        q_input_dim = config.MASAC_AGENT_ATTENTION_DIM + self.encoder.output_dim + action_dim + config.MASAC_AGENT_ID_DIM
+        self.q_head = nn.Sequential(
+            layer_init(nn.Linear(q_input_dim, config.MLP_HIDDEN_DIM)),
+            nn.LayerNorm(config.MLP_HIDDEN_DIM),
+            nn.SiLU(),
+            layer_init(nn.Linear(config.MLP_HIDDEN_DIM, config.MLP_HIDDEN_DIM)),
+            nn.LayerNorm(config.MLP_HIDDEN_DIM),
+            nn.SiLU(),
+            layer_init(nn.Linear(config.MLP_HIDDEN_DIM, 1)),
+        )
+
+    def forward(
+        self,
+        obs: torch.Tensor,
+        actions: torch.Tensor,
+        agent_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        _validate_rank("obs", obs, 3)
+        _validate_rank("actions", actions, 3)
+        _validate_rank("agent_mask", agent_mask, 2)
+        if obs.shape[1] != self.num_agents or actions.shape[1] != self.num_agents or agent_mask.shape[1] != self.num_agents:
+            raise ValueError(
+                f"Agent count mismatch: obs={obs.shape[1]}, actions={actions.shape[1]}, "
+                f"mask={agent_mask.shape[1]}, expected {self.num_agents}"
+            )
+        if obs.shape[0] != actions.shape[0] or obs.shape[0] != agent_mask.shape[0]:
+            raise ValueError(
+                f"Batch size mismatch: obs={obs.shape[0]}, actions={actions.shape[0]}, "
+                f"mask={agent_mask.shape[0]}"
+            )
+        _validate_trailing_dim("obs", obs, self.obs_dim)
+        _validate_trailing_dim("actions", actions, self.action_dim)
+
+        batch_size = obs.shape[0]
+
+        # --- batched local entity encoding ---
+        obs_flat = obs.reshape(batch_size * self.num_agents, self.obs_dim)
+        encoded_obs = self.encoder(obs_flat).reshape(batch_size, self.num_agents, -1)
+
+        # --- agent ID embeddings (vectorized) ---
+        agent_ids = torch.arange(self.num_agents, device=obs.device)
+        agent_id_emb = self.agent_id_embedding(agent_ids).unsqueeze(0).expand(batch_size, -1, -1)
+
+        # --- build tokens ---
+        tokens = torch.cat([encoded_obs, actions, agent_id_emb], dim=-1)
+        tokens = self.token_projection(tokens)
+
+        # --- self-attention with safe masking ---
+        valid_query_mask = agent_mask > 0
+        key_padding_mask = ~valid_query_mask
+        all_inactive = key_padding_mask.all(dim=1)
+        safe_key_padding_mask = key_padding_mask.clone()
+        safe_key_padding_mask[all_inactive] = False
+
+        x = tokens
+        for block in self.attention_blocks:
+            x = block(x, safe_key_padding_mask)
+
+        # --- zero inactive contexts ---
+        context = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        context = torch.where(valid_query_mask.unsqueeze(-1), context, torch.zeros_like(context))
+
+        # --- Q head with skip connections ---
+        q_input = torch.cat([context, encoded_obs, actions, agent_id_emb], dim=-1)
+        q_values = self.q_head(q_input).squeeze(-1)
+        return torch.where(valid_query_mask, q_values, torch.zeros_like(q_values))

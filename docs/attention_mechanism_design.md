@@ -5,6 +5,7 @@
 ## 1. 当前结论
 
 - `USE_ATTENTION` 只影响 `MODEL="mappo"`。
+- `MODEL="masac"` 使用独立的 attention 控制：`MASAC_ATTENTION_ACTOR` 控制 actor 是否使用 attention encoder，`MASAC_CRITIC_MODE` 控制 critic 类型（`"mlp"` / `"local_attention"` / `"agent_self_attention"`），均不受 `USE_ATTENTION` 影响。
 - `MODEL="maddpg"` 无论 `USE_ATTENTION=True/False`，都不会构造 attention encoder、shared encoder、mean pooling 或 agent pooling。
 - `marl_models/attention.py` 当前只保留 MAPPO 仍在使用的基础模块：
   - `parse_observation`
@@ -95,8 +96,7 @@ flat obs
   -> NeighborEmbedding       -> [batch, max_neighbors, 64]
   -> UE CrossAttention       -> [batch, 128]
   -> Neighbor CrossAttention -> [batch, 64]
-  -> masked raw shortcut     -> [batch, 128]
-  -> concat                  -> [batch, 384]
+  -> concat                  -> [batch, 256]
 ```
 
 默认维度：
@@ -104,8 +104,7 @@ flat obs
 - UAV embedding: `64`
 - UE embedding: `128`
 - Neighbor output: `64`
-- Masked raw shortcut: `128`
-- Encoder output: `384`
+- Encoder output: `256`
 - Attention heads: `2`
 - Attention layers per entity branch: `2`
 

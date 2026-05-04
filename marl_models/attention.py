@@ -313,100 +313,62 @@ def parse_observation(obs: torch.Tensor) -> dict:
 
 
 class AttentionEncoder(nn.Module):
-    """
-    完整的注意力编码器：将 flat vector 观测编码为固定维度特征
+    """Encodes a flat observation into a fixed-dimension feature vector via
+    structured cross-attention over UAV, UE, and Neighbor entities.
 
-    架构：
-    1. 解析观测 -> 结构化数据
-    2. UAV Embedding -> [batch, 64]
-    3. UAV summary query 投影到各分支维度
-    4. UE / Neighbor Embedding + 多层残差 CrossAttention 迭代细化 summary
-    5. 空分支显式归零，保持“无实体摘要”语义
-    6. 对 padding 后的原始观测做 masked shortcut 投影
-    7. 拼接 -> [batch, output_dim]
-
-    设计原则：
-    - 输入维度 380，输出维度为结构化 attention summary + masked raw shortcut
-    - 每个分支先用 query projection 对齐维度，再用多层 attention block 做摘要 refinement
-    - UE 分支输出 128 维，Neighbor 分支输出 64 维，保持外部接口不变
-    - 当 UE / Neighbor 数量为 0 时，对应分支输出保持中性 summary
+    Architecture:
+    1. Parse observation → structured tensors
+    2. UAV Embedding → [batch, 64]
+    3. UAV summary query projected to per-branch dimensions
+    4. UE / Neighbor Embedding + stacked residual CrossAttention
+    5. Empty entity branches explicitly zeroed
+    6. Concatenate → [batch, output_dim]
     """
 
     def __init__(self, num_files: int = config.NUM_FILES,
                  ue_embed_dim: int = config.ATTENTION_EMBED_DIM,
                  uav_embed_dim: int = config.ATTENTION_UAV_EMBED_DIM,
                  neighbor_out_dim: int = config.ATTENTION_NEIGHBOR_DIM,
-                 raw_shortcut_dim: int = config.ATTENTION_RAW_SHORTCUT_DIM,
                  num_heads: int = config.ATTENTION_NUM_HEADS,
                  num_layers: int = config.ATTENTION_NUM_LAYERS):
         super().__init__()
         if num_layers <= 0:
             raise ValueError(f"AttentionEncoder requires num_layers > 0, got {num_layers}")
-        if raw_shortcut_dim <= 0:
-            raise ValueError(f"AttentionEncoder requires raw_shortcut_dim > 0, got {raw_shortcut_dim}")
 
-        # Embedding 模块
         self.uav_embed = UAVEmbedding(num_files, uav_embed_dim)
         self.ue_embed = UEEmbedding(num_files, ue_embed_dim)
         self.neighbor_embed = NeighborEmbedding(num_files, neighbor_out_dim)
 
-        # 注意力模块
         self.ue_query_proj = layer_init(nn.Linear(uav_embed_dim, ue_embed_dim))
         self.neighbor_query_proj = layer_init(nn.Linear(uav_embed_dim, neighbor_out_dim))
         self.ue_attention_blocks = build_attention_stack(ue_embed_dim, num_heads, num_layers)
         self.neighbor_attention_blocks = build_attention_stack(neighbor_out_dim, num_heads, num_layers)
 
-        self.raw_shortcut_norm = nn.LayerNorm(config.OBS_DIM_SINGLE)
-        self.raw_shortcut = layer_init(nn.Linear(config.OBS_DIM_SINGLE, raw_shortcut_dim))
-        self.raw_shortcut_out_norm = nn.LayerNorm(raw_shortcut_dim)
-
-        self.attention_summary_dim = uav_embed_dim + ue_embed_dim + neighbor_out_dim
-        self.output_dim = self.attention_summary_dim + raw_shortcut_dim
-
-    def _masked_raw_obs(self, parsed: dict[str, torch.Tensor]) -> torch.Tensor:
-        neighbor_mask = parsed['neighbor_mask'].unsqueeze(-1)
-        ue_mask = parsed['ue_mask'].unsqueeze(-1)
-        return torch.cat([
-            parsed['uav_pos'],
-            parsed['uav_cache'],
-            parsed['uav_active'],
-            (parsed['neighbor_features'] * neighbor_mask).reshape(parsed['uav_pos'].shape[0], -1),
-            parsed['neighbor_mask'].sum(dim=1, keepdim=True),
-            (parsed['ue_features'] * ue_mask).reshape(parsed['uav_pos'].shape[0], -1),
-            parsed['ue_mask'].sum(dim=1, keepdim=True),
-        ], dim=-1)
+        self.output_dim = uav_embed_dim + ue_embed_dim + neighbor_out_dim
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            obs: [batch, obs_dim] flat vector 观测
+            obs: [batch, obs_dim] flat vector observation
         Returns:
-            encoded: [batch, output_dim] 编码后的特征
+            encoded: [batch, output_dim]
         """
-        # 解析观测
         parsed = parse_observation(obs)
 
-        # UAV embedding
         uav_emb = self.uav_embed(parsed['uav_pos'], parsed['uav_cache'], parsed['uav_active'])
 
-        # UE attention
         ue_emb = self.ue_embed(parsed['ue_features'])
         ue_attn = self.ue_query_proj(uav_emb)
         for block in self.ue_attention_blocks:
             ue_attn = block(ue_attn, ue_emb, parsed['ue_mask'])
         ue_attn = zero_empty_summary(ue_attn, parsed['ue_mask'])
 
-        # Neighbor attention
         neighbor_emb = self.neighbor_embed(parsed['neighbor_features'])
         neighbor_attn = self.neighbor_query_proj(uav_emb)
         for block in self.neighbor_attention_blocks:
             neighbor_attn = block(neighbor_attn, neighbor_emb, parsed['neighbor_mask'])
         neighbor_attn = zero_empty_summary(neighbor_attn, parsed['neighbor_mask'])
 
-        raw_shortcut = self.raw_shortcut_norm(self._masked_raw_obs(parsed))
-        raw_shortcut = self.raw_shortcut_out_norm(F.silu(self.raw_shortcut(raw_shortcut)))
-
-        # 拼接所有特征
-        return torch.cat([uav_emb, ue_attn, neighbor_attn, raw_shortcut], dim=-1)
+        return torch.cat([uav_emb, ue_attn, neighbor_attn], dim=-1)
 
 

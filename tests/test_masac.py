@@ -11,9 +11,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import config
 from marl_models.masac.agents import (
     ActorNetwork,
+    AgentSelfAttentionCriticNetwork,
     AttentionActorNetwork,
-    AttentionCriticNetwork,
     CriticNetwork,
+    LocalAttentionCriticNetwork,
 )
 from marl_models.masac.masac import MASAC
 
@@ -93,7 +94,7 @@ def test_masac_networks_use_silu_not_relu() -> None:
 
 def test_masac_attention_networks_forward_with_expected_shapes() -> None:
     actor = AttentionActorNetwork(obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM)
-    critic = AttentionCriticNetwork(num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM)
+    critic = LocalAttentionCriticNetwork(num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM)
 
     actions, log_prob = actor.sample(torch.randn(4, config.OBS_DIM_SINGLE))
     q_values = critic(
@@ -127,8 +128,8 @@ def test_masac_attention_actor_rejects_invalid_obs_dim() -> None:
         AttentionActorNetwork(obs_dim=config.OBS_DIM_SINGLE - 1, action_dim=config.ACTION_DIM)
 
 
-def test_masac_attention_critic_rejects_invalid_action_width() -> None:
-    critic = AttentionCriticNetwork(num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM)
+def test_masac_local_attention_critic_rejects_invalid_action_width() -> None:
+    critic = LocalAttentionCriticNetwork(num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM)
 
     with pytest.raises(ValueError, match="joint_action"):
         critic(
@@ -191,21 +192,6 @@ def test_masac_preserves_per_agent_reward_columns() -> None:
 
     expected = rewards_tensor + config.DISCOUNT_FACTOR * target_q * bootstrap_mask
     assert torch.equal(targets, expected)
-
-
-def test_masac_preserves_per_agent_bootstrap_mask() -> None:
-    model = MASAC("masac", num_agents=3, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
-    bootstrap_mask_tensor = torch.tensor(
-        [
-            [1.0, 0.0, 1.0],
-            [0.0, 0.0, 0.0],
-        ],
-        dtype=torch.float32,
-    )
-
-    per_agent_bootstrap_mask = model._per_agent_bootstrap_mask(bootstrap_mask_tensor)
-
-    assert torch.equal(per_agent_bootstrap_mask, bootstrap_mask_tensor)
 
 
 def test_masac_masked_inactive_agent_log_probs_per_agent() -> None:
@@ -326,7 +312,6 @@ def test_masac_actor_step_rejects_log_prob_shape_mismatch(monkeypatch: pytest.Mo
     batch = _make_batch(batch_size=2, num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=2)
     obs_tensor = torch.as_tensor(batch["obs"], dtype=torch.float32, device=model.device)
     active_mask_tensor = torch.as_tensor(batch["active_mask"], dtype=torch.float32, device=model.device)
-    obs_flat = obs_tensor.reshape(obs_tensor.shape[0], -1)
 
     sample_calls = {"count": 0}
 
@@ -343,7 +328,6 @@ def test_masac_actor_step_rejects_log_prob_shape_mismatch(monkeypatch: pytest.Mo
     with pytest.raises(ValueError, match="log_probs"):
         model._optimize_actor(
             obs_tensor=obs_tensor,
-            obs_flat=obs_flat,
             active_mask_tensor=active_mask_tensor,
             alpha=model.log_alpha.exp(),
         )
@@ -406,14 +390,12 @@ def test_masac_actor_step_does_not_accumulate_critic_gradients() -> None:
 
     obs_tensor = torch.as_tensor(batch["obs"], dtype=torch.float32, device=model.device)
     active_mask_tensor = torch.as_tensor(batch["active_mask"], dtype=torch.float32, device=model.device)
-    obs_flat = obs_tensor.reshape(obs_tensor.shape[0], -1)
 
     model.actor_optimizer.zero_grad(set_to_none=True)
     model.critic_1_optimizer.zero_grad(set_to_none=True)
     model.critic_2_optimizer.zero_grad(set_to_none=True)
     model._optimize_actor(
         obs_tensor=obs_tensor,
-        obs_flat=obs_flat,
         active_mask_tensor=active_mask_tensor,
         alpha=model.log_alpha.exp(),
     )
@@ -445,33 +427,27 @@ def test_masac_save_and_load_round_trip(tmp_path: Path) -> None:
     _assert_nested_tensors_equal(model.alpha_optimizer.state_dict(), restored.alpha_optimizer.state_dict())
 
 
-def test_masac_save_writes_vector_critic_checkpoint_metadata(tmp_path: Path) -> None:
+def test_masac_save_writes_checkpoint_metadata(tmp_path: Path) -> None:
     model = MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
-    original_use_attention = config.USE_ATTENTION
 
     save_dir = tmp_path / "checkpoint"
     save_dir.mkdir()
-    try:
-        config.USE_ATTENTION = not original_use_attention
-        model.save(str(save_dir))
-    finally:
-        config.USE_ATTENTION = original_use_attention
+    model.save(str(save_dir))
 
     checkpoint = torch.load(save_dir / "masac.pt", map_location="cpu")
 
-    assert checkpoint["checkpoint_format"] == "shared_masac_vector_critic"
-    assert checkpoint["checkpoint_version"] == 1
+    assert checkpoint["checkpoint_format"] == "shared_masac_configurable_critic"
+    assert checkpoint["checkpoint_version"] == 2
     assert checkpoint["num_agents"] == 2
-    assert checkpoint["actor_type"] == "shared"
-    assert checkpoint["critic_type"] == "shared_vector"
-    assert checkpoint["uses_attention"] is model.use_attention
+    assert checkpoint["use_attention_actor"] is False
+    assert checkpoint["critic_mode"] == "mlp"
 
 
 @pytest.mark.parametrize(
     ("checkpoint_format", "checkpoint_version"),
     [
-        ("legacy_masac", 1),
-        ("shared_masac_vector_critic", 2),
+        ("legacy_masac", 2),
+        ("shared_masac_configurable_critic", 1),
     ],
 )
 def test_masac_load_rejects_incompatible_checkpoint_metadata(
@@ -488,9 +464,8 @@ def test_masac_load_rejects_incompatible_checkpoint_metadata(
             "checkpoint_format": checkpoint_format,
             "checkpoint_version": checkpoint_version,
             "num_agents": 2,
-            "actor_type": "shared",
-            "critic_type": "shared_vector",
-            "uses_attention": False,
+            "use_attention_actor": False,
+            "critic_mode": "mlp",
             "model": model.state_dict(),
             "actor_optimizer": model.actor_optimizer.state_dict(),
             "critic_1_optimizer": model.critic_1_optimizer.state_dict(),
@@ -504,19 +479,18 @@ def test_masac_load_rejects_incompatible_checkpoint_metadata(
         model.load(str(save_dir))
 
 
-def test_masac_load_rejects_attention_architecture_mismatch(tmp_path: Path) -> None:
+def test_masac_load_rejects_critic_mode_mismatch(tmp_path: Path) -> None:
     model = MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
     save_dir = tmp_path / "checkpoint"
     save_dir.mkdir()
 
     torch.save(
         {
-            "checkpoint_format": "shared_masac_vector_critic",
-            "checkpoint_version": 1,
+            "checkpoint_format": "shared_masac_configurable_critic",
+            "checkpoint_version": 2,
             "num_agents": 2,
-            "actor_type": "shared",
-            "critic_type": "shared_vector",
-            "uses_attention": True,
+            "use_attention_actor": False,
+            "critic_mode": "agent_self_attention",
             "model": model.state_dict(),
             "actor_optimizer": model.actor_optimizer.state_dict(),
             "critic_1_optimizer": model.critic_1_optimizer.state_dict(),
@@ -526,23 +500,24 @@ def test_masac_load_rejects_attention_architecture_mismatch(tmp_path: Path) -> N
         save_dir / "masac.pt",
     )
 
-    with pytest.raises(ValueError, match="architecture|attention"):
+    with pytest.raises(ValueError, match="critic_mode"):
         model.load(str(save_dir))
 
 
-def test_masac_load_uses_instance_attention_mode_not_mutable_config(
+def test_masac_load_rejects_actor_attention_mismatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(config, "USE_ATTENTION", False)
+    monkeypatch.setattr(config, "MASAC_ATTENTION_ACTOR", False)
+    monkeypatch.setattr(config, "MASAC_CRITIC_MODE", "mlp")
     source = MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
 
     save_dir = tmp_path / "checkpoint"
     save_dir.mkdir()
 
-    monkeypatch.setattr(config, "USE_ATTENTION", True)
+    monkeypatch.setattr(config, "MASAC_ATTENTION_ACTOR", True)
     source.save(str(save_dir))
-    attention_model = MASAC(
+    attention_actor_model = MASAC(
         "masac",
         num_agents=2,
         obs_dim=config.OBS_DIM_SINGLE,
@@ -550,24 +525,39 @@ def test_masac_load_uses_instance_attention_mode_not_mutable_config(
         device="cpu",
     )
 
-    with pytest.raises(ValueError, match="attention"):
-        attention_model.load(str(save_dir))
+    with pytest.raises(ValueError, match="attention_actor"):
+        attention_actor_model.load(str(save_dir))
 
 
-def test_masac_builds_attention_networks_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(config, "USE_ATTENTION", True)
+def test_masac_builds_agent_self_attention_critic(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "MASAC_ATTENTION_ACTOR", True)
+    monkeypatch.setattr(config, "MASAC_CRITIC_MODE", "agent_self_attention")
 
     model = MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
 
     assert isinstance(model.actor, AttentionActorNetwork)
-    assert isinstance(model.critic_1, AttentionCriticNetwork)
-    assert isinstance(model.critic_2, AttentionCriticNetwork)
-    assert isinstance(model.target_critic_1, AttentionCriticNetwork)
-    assert isinstance(model.target_critic_2, AttentionCriticNetwork)
+    assert isinstance(model.critic_1, AgentSelfAttentionCriticNetwork)
+    assert isinstance(model.critic_2, AgentSelfAttentionCriticNetwork)
+    assert isinstance(model.target_critic_1, AgentSelfAttentionCriticNetwork)
+    assert isinstance(model.target_critic_2, AgentSelfAttentionCriticNetwork)
+    assert model.use_attention_actor is True
+    assert model.critic_mode == "agent_self_attention"
+
+
+def test_masac_builds_local_attention_critic(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "MASAC_ATTENTION_ACTOR", False)
+    monkeypatch.setattr(config, "MASAC_CRITIC_MODE", "local_attention")
+
+    model = MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
+
+    assert isinstance(model.actor, ActorNetwork)
+    assert isinstance(model.critic_1, LocalAttentionCriticNetwork)
+    assert isinstance(model.critic_2, LocalAttentionCriticNetwork)
 
 
 def test_masac_attention_targets_remain_frozen(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(config, "USE_ATTENTION", True)
+    monkeypatch.setattr(config, "MASAC_ATTENTION_ACTOR", True)
+    monkeypatch.setattr(config, "MASAC_CRITIC_MODE", "agent_self_attention")
 
     model = MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
 
@@ -575,11 +565,145 @@ def test_masac_attention_targets_remain_frozen(monkeypatch: pytest.MonkeyPatch) 
     assert all(not param.requires_grad for param in model.target_critic_2.parameters())
 
 
-def test_masac_attention_update_smoke(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(config, "USE_ATTENTION", True)
+def test_masac_agent_self_attention_update_smoke(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "MASAC_ATTENTION_ACTOR", False)
+    monkeypatch.setattr(config, "MASAC_CRITIC_MODE", "agent_self_attention")
 
     model = MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
     stats = model.update(_make_batch(4, 2, config.OBS_DIM_SINGLE, config.ACTION_DIM))
 
     assert np.isfinite(stats["actor_loss"])
     assert np.isfinite(stats["critic_loss"])
+
+
+def test_masac_attention_actor_with_agent_self_attention_critic_update_smoke(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config, "MASAC_ATTENTION_ACTOR", True)
+    monkeypatch.setattr(config, "MASAC_CRITIC_MODE", "agent_self_attention")
+
+    model = MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
+    stats = model.update(_make_batch(4, 2, config.OBS_DIM_SINGLE, config.ACTION_DIM))
+
+    assert np.isfinite(stats["actor_loss"])
+    assert np.isfinite(stats["critic_loss"])
+
+
+# --- agent self-attention critic unit tests ---
+
+
+def test_agent_self_attention_critic_output_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "MASAC_AGENT_ATTENTION_DIM", 256)
+    monkeypatch.setattr(config, "MASAC_AGENT_ATTENTION_HEADS", 4)
+    monkeypatch.setattr(config, "MASAC_AGENT_ATTENTION_LAYERS", 1)
+    monkeypatch.setattr(config, "MASAC_AGENT_ATTENTION_FFN_MULT", 4)
+    monkeypatch.setattr(config, "MASAC_AGENT_ID_DIM", 32)
+
+    critic = AgentSelfAttentionCriticNetwork(num_agents=3, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM)
+    obs = torch.randn(4, 3, config.OBS_DIM_SINGLE)
+    actions = torch.randn(4, 3, config.ACTION_DIM)
+    mask = torch.ones(4, 3)
+
+    q = critic(obs, actions, mask)
+
+    assert q.shape == (4, 3)
+    assert torch.isfinite(q).all()
+
+
+def test_agent_self_attention_critic_inactive_agent_does_not_affect_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config, "MASAC_AGENT_ATTENTION_DIM", 256)
+    monkeypatch.setattr(config, "MASAC_AGENT_ATTENTION_HEADS", 4)
+    monkeypatch.setattr(config, "MASAC_AGENT_ATTENTION_LAYERS", 1)
+    monkeypatch.setattr(config, "MASAC_AGENT_ATTENTION_FFN_MULT", 4)
+    monkeypatch.setattr(config, "MASAC_AGENT_ID_DIM", 32)
+
+    critic = AgentSelfAttentionCriticNetwork(num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM)
+    obs = torch.randn(2, 2, config.OBS_DIM_SINGLE)
+    actions = torch.randn(2, 2, config.ACTION_DIM)
+    mask = torch.tensor([[1.0, 1.0], [1.0, 0.0]])
+
+    q_base = critic(obs, actions, mask)
+
+    # Perturb the inactive agent's observation — active agent's Q must be unchanged
+    obs_perturbed = obs.clone()
+    obs_perturbed[1, 1, :] = 100.0
+    q_perturbed = critic(obs_perturbed, actions, mask)
+
+    assert torch.allclose(q_base[1, 0], q_perturbed[1, 0])
+
+
+def test_agent_self_attention_critic_all_inactive_row_finite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config, "MASAC_AGENT_ATTENTION_DIM", 256)
+    monkeypatch.setattr(config, "MASAC_AGENT_ATTENTION_HEADS", 4)
+    monkeypatch.setattr(config, "MASAC_AGENT_ATTENTION_LAYERS", 1)
+    monkeypatch.setattr(config, "MASAC_AGENT_ATTENTION_FFN_MULT", 4)
+    monkeypatch.setattr(config, "MASAC_AGENT_ID_DIM", 32)
+
+    critic = AgentSelfAttentionCriticNetwork(num_agents=3, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM)
+    obs = torch.randn(2, 3, config.OBS_DIM_SINGLE)
+    actions = torch.randn(2, 3, config.ACTION_DIM)
+    mask = torch.tensor([[1.0, 1.0, 1.0], [0.0, 0.0, 0.0]])
+
+    q = critic(obs, actions, mask)
+
+    assert q.shape == (2, 3)
+    assert torch.isfinite(q).all()
+    assert torch.equal(q[1], torch.zeros_like(q[1]))
+
+
+def test_agent_self_attention_critic_rejects_rank_errors() -> None:
+    critic = AgentSelfAttentionCriticNetwork(num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM)
+
+    with pytest.raises(ValueError, match="obs"):
+        critic(torch.randn(4, config.OBS_DIM_SINGLE), torch.randn(4, 2, config.ACTION_DIM), torch.ones(4, 2))
+
+    with pytest.raises(ValueError, match="actions"):
+        critic(torch.randn(4, 2, config.OBS_DIM_SINGLE), torch.randn(4, config.ACTION_DIM), torch.ones(4, 2))
+
+    with pytest.raises(ValueError, match="agent_mask"):
+        critic(torch.randn(4, 2, config.OBS_DIM_SINGLE), torch.randn(4, 2, config.ACTION_DIM), torch.ones(4, 2, 1))
+
+
+def test_agent_self_attention_critic_rejects_agent_count_mismatch() -> None:
+    critic = AgentSelfAttentionCriticNetwork(num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM)
+
+    with pytest.raises(ValueError, match="Agent count"):
+        critic(
+            torch.randn(4, 3, config.OBS_DIM_SINGLE),
+            torch.randn(4, 2, config.ACTION_DIM),
+            torch.ones(4, 2),
+        )
+
+
+def test_masac_rejects_unknown_critic_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "MASAC_CRITIC_MODE", "invalid_mode")
+
+    with pytest.raises(ValueError, match="MASAC_CRITIC_MODE"):
+        MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
+
+
+def test_agent_self_attention_critic_save_load_round_trip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config, "MASAC_ATTENTION_ACTOR", False)
+    monkeypatch.setattr(config, "MASAC_CRITIC_MODE", "agent_self_attention")
+
+    model = MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
+    batch = _make_batch(batch_size=4, num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM)
+    model.update(batch)
+
+    save_dir = tmp_path / "checkpoint"
+    save_dir.mkdir()
+    model.save(str(save_dir))
+
+    restored = MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
+    restored.load(str(save_dir))
+
+    for key, value in model.state_dict().items():
+        assert torch.equal(value, restored.state_dict()[key])
+    assert restored.critic_mode == "agent_self_attention"
+    assert restored.use_attention_actor is False

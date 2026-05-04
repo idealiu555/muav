@@ -1,5 +1,11 @@
 from marl_models.base_model import MARLModel, ExperienceBatch
-from marl_models.masac.agents import ActorNetwork, AttentionActorNetwork, AttentionCriticNetwork, CriticNetwork
+from marl_models.masac.agents import (
+    ActorNetwork,
+    AgentSelfAttentionCriticNetwork,
+    AttentionActorNetwork,
+    CriticNetwork,
+    LocalAttentionCriticNetwork,
+)
 from marl_models.buffer_and_helpers import soft_update, masked_mean
 import config
 import torch
@@ -11,30 +17,38 @@ import os
 
 class MASAC(MARLModel):
     """MADDPG + SAC style MASAC implementation"""
-    CHECKPOINT_FORMAT = "shared_masac_vector_critic"
-    CHECKPOINT_VERSION = 1
+    CHECKPOINT_FORMAT = "shared_masac_configurable_critic"
+    CHECKPOINT_VERSION = 2
 
     def __init__(self, model_name: str, num_agents: int, obs_dim: int, action_dim: int, device: str) -> None:
         super().__init__(model_name, num_agents, obs_dim, action_dim, device)
         self._validate_hyperparameters()
+        self._validate_critic_mode()
         self.total_obs_dim: int = num_agents * obs_dim
         self.total_action_dim: int = num_agents * action_dim
         self.checkpoint_path = "masac.pt"
-        actor_cls = AttentionActorNetwork if config.USE_ATTENTION else ActorNetwork
-        critic_cls = AttentionCriticNetwork if config.USE_ATTENTION else CriticNetwork
-        self.use_attention: bool = actor_cls is AttentionActorNetwork
 
+        self.use_attention_actor: bool = config.MASAC_ATTENTION_ACTOR
+        self.critic_mode: str = config.MASAC_CRITIC_MODE
+
+        actor_cls = AttentionActorNetwork if self.use_attention_actor else ActorNetwork
         self.actor = actor_cls(obs_dim, action_dim).to(device)
-        if critic_cls is AttentionCriticNetwork:
-            self.critic_1 = critic_cls(num_agents, obs_dim, action_dim).to(device)
-            self.critic_2 = critic_cls(num_agents, obs_dim, action_dim).to(device)
-            self.target_critic_1 = critic_cls(num_agents, obs_dim, action_dim).to(device)
-            self.target_critic_2 = critic_cls(num_agents, obs_dim, action_dim).to(device)
-        else:
-            self.critic_1 = critic_cls(self.total_obs_dim, self.total_action_dim, num_agents).to(device)
-            self.critic_2 = critic_cls(self.total_obs_dim, self.total_action_dim, num_agents).to(device)
-            self.target_critic_1 = critic_cls(self.total_obs_dim, self.total_action_dim, num_agents).to(device)
-            self.target_critic_2 = critic_cls(self.total_obs_dim, self.total_action_dim, num_agents).to(device)
+
+        if self.critic_mode == "mlp":
+            self.critic_1 = CriticNetwork(self.total_obs_dim, self.total_action_dim, num_agents).to(device)
+            self.critic_2 = CriticNetwork(self.total_obs_dim, self.total_action_dim, num_agents).to(device)
+            self.target_critic_1 = CriticNetwork(self.total_obs_dim, self.total_action_dim, num_agents).to(device)
+            self.target_critic_2 = CriticNetwork(self.total_obs_dim, self.total_action_dim, num_agents).to(device)
+        elif self.critic_mode == "local_attention":
+            self.critic_1 = LocalAttentionCriticNetwork(num_agents, obs_dim, action_dim).to(device)
+            self.critic_2 = LocalAttentionCriticNetwork(num_agents, obs_dim, action_dim).to(device)
+            self.target_critic_1 = LocalAttentionCriticNetwork(num_agents, obs_dim, action_dim).to(device)
+            self.target_critic_2 = LocalAttentionCriticNetwork(num_agents, obs_dim, action_dim).to(device)
+        elif self.critic_mode == "agent_self_attention":
+            self.critic_1 = AgentSelfAttentionCriticNetwork(num_agents, obs_dim, action_dim).to(device)
+            self.critic_2 = AgentSelfAttentionCriticNetwork(num_agents, obs_dim, action_dim).to(device)
+            self.target_critic_1 = AgentSelfAttentionCriticNetwork(num_agents, obs_dim, action_dim).to(device)
+            self.target_critic_2 = AgentSelfAttentionCriticNetwork(num_agents, obs_dim, action_dim).to(device)
 
         self.log_alpha = nn.Parameter(torch.zeros(1, device=self.device))
         self._init_target_networks()
@@ -63,8 +77,27 @@ class MASAC(MARLModel):
                 actions[i] = action.squeeze(0).cpu().numpy()
         return actions
 
-    def _per_agent_bootstrap_mask(self, bootstrap_mask_tensor: torch.Tensor) -> torch.Tensor:
-        return bootstrap_mask_tensor
+    def _validate_critic_mode(self) -> None:
+        if config.MASAC_CRITIC_MODE not in ("mlp", "local_attention", "agent_self_attention"):
+            raise ValueError(
+                f"Unknown MASAC_CRITIC_MODE: {config.MASAC_CRITIC_MODE!r}. "
+                "Expected one of: 'mlp', 'local_attention', 'agent_self_attention'."
+            )
+
+    def _critic_values(
+        self,
+        critic: nn.Module,
+        obs_tensor: torch.Tensor,
+        actions_tensor: torch.Tensor,
+        agent_mask_tensor: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.critic_mode in ("mlp", "local_attention"):
+            batch_size = obs_tensor.shape[0]
+            return critic(
+                obs_tensor.reshape(batch_size, -1),
+                actions_tensor.reshape(batch_size, -1),
+            )
+        return critic(obs_tensor, actions_tensor, agent_mask_tensor)
 
     def _per_agent_targets(
         self,
@@ -141,14 +174,6 @@ class MASAC(MARLModel):
             bootstrap_mask_tensor,
         )
 
-        batch_size: int = obs_tensor.shape[0]
-        obs_flat: torch.Tensor = obs_tensor.reshape(batch_size, -1)
-        next_obs_flat: torch.Tensor = next_obs_tensor.reshape(batch_size, -1)
-        actions_flat: torch.Tensor = actions_tensor.reshape(batch_size, -1)
-
-        per_agent_bootstrap_mask = self._per_agent_bootstrap_mask(bootstrap_mask_tensor)
-        self._validate_per_agent_tensor("per_agent_bootstrap_mask", per_agent_bootstrap_mask)
-
         self._clamp_log_alpha()
         alpha: torch.Tensor = self.log_alpha.exp()
 
@@ -157,26 +182,34 @@ class MASAC(MARLModel):
             next_log_probs_list: list[torch.Tensor] = []
             for i in range(self.num_agents):
                 next_action, next_log_prob = self.actor.sample(next_obs_tensor[:, i, :])
-                next_actions_list.append(next_action * per_agent_bootstrap_mask[:, i:i + 1])
+                next_actions_list.append(next_action * bootstrap_mask_tensor[:, i:i + 1])
                 next_log_probs_list.append(next_log_prob)
 
-            next_actions_tensor: torch.Tensor = torch.cat(next_actions_list, dim=1)
+            next_actions_tensor: torch.Tensor = torch.stack(next_actions_list, dim=1)
             next_log_probs: torch.Tensor = self._masked_log_probs(
                 torch.cat(next_log_probs_list, dim=1),
-                per_agent_bootstrap_mask,
+                bootstrap_mask_tensor,
             )
-            target_q1: torch.Tensor = self.target_critic_1(next_obs_flat, next_actions_tensor)
-            target_q2: torch.Tensor = self.target_critic_2(next_obs_flat, next_actions_tensor)
+            target_q1: torch.Tensor = self._critic_values(
+                self.target_critic_1, next_obs_tensor, next_actions_tensor, bootstrap_mask_tensor,
+            )
+            target_q2: torch.Tensor = self._critic_values(
+                self.target_critic_2, next_obs_tensor, next_actions_tensor, bootstrap_mask_tensor,
+            )
             self._validate_per_agent_tensor("target_critic_1", target_q1)
             self._validate_per_agent_tensor("target_critic_2", target_q2)
             self._require_same_shape("target_critic_1", target_q1, "next_log_probs", next_log_probs)
             self._require_same_shape("target_critic_2", target_q2, "next_log_probs", next_log_probs)
             min_target_q: torch.Tensor = torch.min(target_q1, target_q2)
             target_q: torch.Tensor = min_target_q - alpha.detach() * next_log_probs
-            y: torch.Tensor = self._per_agent_targets(rewards_tensor, target_q, per_agent_bootstrap_mask)
+            y: torch.Tensor = self._per_agent_targets(rewards_tensor, target_q, bootstrap_mask_tensor)
 
-        current_q1: torch.Tensor = self.critic_1(obs_flat, actions_flat)
-        current_q2: torch.Tensor = self.critic_2(obs_flat, actions_flat)
+        current_q1: torch.Tensor = self._critic_values(
+            self.critic_1, obs_tensor, actions_tensor, active_mask_tensor,
+        )
+        current_q2: torch.Tensor = self._critic_values(
+            self.critic_2, obs_tensor, actions_tensor, active_mask_tensor,
+        )
         self._validate_per_agent_tensor("critic_1", current_q1)
         self._validate_per_agent_tensor("critic_2", current_q2)
         self._require_same_shape("critic_1", current_q1, "y", y)
@@ -201,7 +234,6 @@ class MASAC(MARLModel):
 
         actor_loss, masked_log_probs, actor_grad_norm = self._optimize_actor(
             obs_tensor=obs_tensor,
-            obs_flat=obs_flat,
             active_mask_tensor=active_mask_tensor,
             alpha=alpha,
         )
@@ -257,9 +289,8 @@ class MASAC(MARLModel):
                 "checkpoint_format": self.CHECKPOINT_FORMAT,
                 "checkpoint_version": self.CHECKPOINT_VERSION,
                 "num_agents": self.num_agents,
-                "actor_type": "shared",
-                "critic_type": "shared_vector",
-                "uses_attention": self.use_attention,
+                "use_attention_actor": self.use_attention_actor,
+                "critic_mode": self.critic_mode,
                 "model": self.state_dict(),
                 "actor_optimizer": self.actor_optimizer.state_dict(),
                 "critic_1_optimizer": self.critic_1_optimizer.state_dict(),
@@ -280,9 +311,8 @@ class MASAC(MARLModel):
         checkpoint_format = checkpoint.get("checkpoint_format")
         checkpoint_version = checkpoint.get("checkpoint_version")
         checkpoint_num_agents = checkpoint.get("num_agents")
-        actor_type = checkpoint.get("actor_type")
-        critic_type = checkpoint.get("critic_type")
-        uses_attention = checkpoint.get("uses_attention")
+        saved_critic_mode = checkpoint.get("critic_mode", "mlp")
+        saved_use_attention_actor = checkpoint.get("use_attention_actor", False)
 
         if checkpoint_format != self.CHECKPOINT_FORMAT:
             raise ValueError(
@@ -299,16 +329,16 @@ class MASAC(MARLModel):
                 "Incompatible MASAC checkpoint agent count: "
                 f"expected {self.num_agents}, got {checkpoint_num_agents!r}"
             )
-        if actor_type != "shared" or critic_type != "shared_vector":
+        if saved_critic_mode != self.critic_mode:
             raise ValueError(
-                "Incompatible MASAC checkpoint architecture: "
-                f"expected shared actor/shared vector critic, got actor_type={actor_type!r}, "
-                f"critic_type={critic_type!r}"
+                "Incompatible MASAC checkpoint critic_mode: "
+                f"expected {self.critic_mode!r}, got {saved_critic_mode!r}"
             )
-        if uses_attention != self.use_attention:
+        if saved_use_attention_actor != self.use_attention_actor:
             raise ValueError(
-                "Incompatible MASAC checkpoint attention architecture: "
-                f"expected uses_attention={self.use_attention}, got {uses_attention!r}"
+                "Incompatible MASAC checkpoint attention actor: "
+                f"expected use_attention_actor={self.use_attention_actor}, "
+                f"got {saved_use_attention_actor!r}"
             )
         self.load_state_dict(checkpoint["model"])
         self.actor_optimizer.load_state_dict(checkpoint["actor_optimizer"])
@@ -327,7 +357,6 @@ class MASAC(MARLModel):
     def _optimize_actor(
         self,
         obs_tensor: torch.Tensor,
-        obs_flat: torch.Tensor,
         active_mask_tensor: torch.Tensor,
         alpha: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, float]:
@@ -338,15 +367,19 @@ class MASAC(MARLModel):
             pred_actions_list.append(pred_action * active_mask_tensor[:, i:i + 1])
             log_probs_list.append(log_prob)
 
-        pred_actions_flat: torch.Tensor = torch.cat(pred_actions_list, dim=1)
+        pred_actions_tensor: torch.Tensor = torch.stack(pred_actions_list, dim=1)
         masked_log_probs: torch.Tensor = self._masked_log_probs(
             torch.cat(log_probs_list, dim=1),
             active_mask_tensor,
         )
         self._set_critic_grads(enabled=False)
         try:
-            q1_pred: torch.Tensor = self.critic_1(obs_flat, pred_actions_flat)
-            q2_pred: torch.Tensor = self.critic_2(obs_flat, pred_actions_flat)
+            q1_pred: torch.Tensor = self._critic_values(
+                self.critic_1, obs_tensor, pred_actions_tensor, active_mask_tensor,
+            )
+            q2_pred: torch.Tensor = self._critic_values(
+                self.critic_2, obs_tensor, pred_actions_tensor, active_mask_tensor,
+            )
             self._validate_per_agent_tensor("critic_1", q1_pred)
             self._validate_per_agent_tensor("critic_2", q2_pred)
             self._require_same_shape("critic_1", q1_pred, "masked_log_probs", masked_log_probs)
