@@ -60,9 +60,9 @@ assert MAX_ASSOCIATED_UES >= 1 and MAX_ASSOCIATED_UES <= NUM_UES
 
 # Attention Mechanism Parameters (注意力机制参数)
 USE_ATTENTION: bool = False  # 是否使用注意力机制处理可变长度 UE 列表
-ATTENTION_EMBED_DIM: int = 128  # UE 注意力的 embedding 维度 (heads=2, head_dim=64)
-ATTENTION_UAV_EMBED_DIM: int = 64  # UAV 状态的 embedding 维度
-ATTENTION_NEIGHBOR_DIM: int = 64  # Neighbor 注意力输出维度 (heads=2, head_dim=32)
+ATTENTION_EMBED_DIM: int = 192  # UE 注意力的 embedding 维度 (heads=2, head_dim=96)
+ATTENTION_UAV_EMBED_DIM: int = 96  # UAV 状态的 embedding 维度
+ATTENTION_NEIGHBOR_DIM: int = 96  # Neighbor 注意力输出维度 (heads=2, head_dim=48)
 ATTENTION_NUM_HEADS: int = 2  # 多头注意力的头数
 ATTENTION_NUM_LAYERS: int = 2  # 每个实体分支的残差 cross-attention 层数
 
@@ -150,7 +150,7 @@ NEIGHBOR_STATE_DIM: int = 3 + NUM_FILES + 3  # 26 dims
 # - 基础部分: uav_state + neighbors + ues
 # - 额外字段: neighbor_count(1) + ue_count(1)，用于 attention mask 或无 attention 的均值池化
 # OBS_DIM: 24+4*26+1+50*5+1 = 380
-# 编码器输出维度：UAV(64) + UE_attn(128) + Neighbor_attn(64) = 256
+# 编码器输出维度：UAV(96) + UE_attn(192) + Neighbor_attn(96) = 384
 _OBS_BASE_DIM: int = (OWN_STATE_DIM +
                       MAX_UAV_NEIGHBORS * NEIGHBOR_STATE_DIM +
                       MAX_ASSOCIATED_UES * UE_STATE_DIM)
@@ -164,7 +164,7 @@ OBS_DIM_SINGLE: int = _OBS_BASE_DIM + 2
 # This is intentionally different from the official onpolicy Box-action path, which
 # evaluates/executes the same unsquashed action tensor without a local tanh-squash contract.
 ACTION_DIM: int = 5 if BEAM_CONTROL_ENABLED else 3  # [dx, dy, dz] 或 [dx, dy, dz, beam_theta, beam_phi]
-MLP_HIDDEN_DIM: int = 768  # shared hidden width for actor/critic MLP blocks
+MLP_HIDDEN_DIM: int = 512  # shared hidden width for actor and non-MASAC MLP blocks
 
 ACTOR_LR: float = 1e-4
 MADDPG_ACTOR_LR: float = 5e-5
@@ -209,12 +209,13 @@ PPO_MAX_LOG_RATIO: float = 10.0  # clip log-ratio before exp to avoid numerical 
 PPO_VALUE_LOSS_COEF: float = 0.5  # coefficient for value function loss (PPO paper default)
 
 # MASAC Specific Hyperparameters
-MASAC_ATTENTION_ACTOR: bool = False  # enable local entity encoder in actor
-MASAC_CRITIC_MODE: str = "mlp"  # options: "mlp", "local_attention", "agent_self_attention"
+MASAC_ATTENTION_ACTOR: bool = True  # enable local entity encoder in actor
+MASAC_CRITIC_MODE: str = "agent_self_attention"  # options: "mlp", "local_attention", "agent_self_attention"
+MASAC_CRITIC_HIDDEN_DIM: int = 768  # hidden width for MASAC critic MLP/Q heads
 MASAC_AGENT_ID_DIM: int = 32  # agent identity embedding dimension
-MASAC_AGENT_ATTENTION_DIM: int = 256  # agent self-attention hidden dimension
+MASAC_AGENT_ATTENTION_DIM: int = 384  # agent self-attention hidden dimension
 MASAC_AGENT_ATTENTION_HEADS: int = 4  # number of attention heads
-MASAC_AGENT_ATTENTION_LAYERS: int = 1  # number of self-attention blocks
+MASAC_AGENT_ATTENTION_LAYERS: int = 2  # number of self-attention blocks
 MASAC_AGENT_ATTENTION_FFN_MULT: int = 4  # FFN hidden multiplier
 ALPHA_MIN: float = 1e-3  # lower bound for entropy temperature to avoid collapsing exploration entirely
 TARGET_ENTROPY_SCALE: float = 0.5  # scales the default SAC target entropy of -action_dim

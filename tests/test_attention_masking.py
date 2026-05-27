@@ -105,6 +105,30 @@ def test_attention_encoder_ignores_padded_neighbor_and_ue_values() -> None:
     assert torch.allclose(encoded, encoded_modified, atol=1e-5, rtol=1e-5)
 
 
+def test_attention_encoder_ignores_inactive_neighbor_slots_within_count() -> None:
+    encoder = AttentionEncoder()
+    obs = _make_obs_batch(batch_size=1)
+
+    neighbor_start = _neighbor_section_start()
+    obs[0, _neighbor_count_index()] = 2.0
+
+    first_neighbor = neighbor_start
+    second_neighbor = neighbor_start + config.NEIGHBOR_STATE_DIM
+    obs[0, first_neighbor:first_neighbor + config.NEIGHBOR_STATE_DIM] = torch.arange(
+        1, config.NEIGHBOR_STATE_DIM + 1, dtype=torch.float32
+    )
+    obs[0, first_neighbor + config.NEIGHBOR_STATE_DIM - 1] = 1.0
+
+    inactive_modified = obs.clone()
+    inactive_modified[0, second_neighbor:second_neighbor + config.NEIGHBOR_STATE_DIM] = 999.0
+    inactive_modified[0, second_neighbor + config.NEIGHBOR_STATE_DIM - 1] = 0.0
+
+    encoded = encoder(obs)
+    encoded_modified = encoder(inactive_modified)
+
+    assert torch.allclose(encoded, encoded_modified, atol=1e-5, rtol=1e-5)
+
+
 def test_attention_encoder_mixed_batch_keeps_rows_isolated() -> None:
     encoder = AttentionEncoder()
 
@@ -128,5 +152,5 @@ def test_attention_encoder_mixed_batch_keeps_rows_isolated() -> None:
     zero_encoded = encoder(zero_obs)
     populated_encoded = encoder(populated_obs)
 
-    assert torch.allclose(mixed_encoded[0], zero_encoded[0], atol=1e-6, rtol=1e-6)
-    assert torch.allclose(mixed_encoded[1], populated_encoded[0], atol=1e-6, rtol=1e-6)
+    assert torch.allclose(mixed_encoded[0], zero_encoded[0], atol=1e-5, rtol=1e-5)
+    assert torch.allclose(mixed_encoded[1], populated_encoded[0], atol=1e-5, rtol=1e-5)

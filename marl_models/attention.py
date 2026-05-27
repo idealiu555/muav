@@ -25,9 +25,9 @@ class UEEmbedding(nn.Module):
         super().__init__()
         # 根据 embed_dim 动态分配各部分维度
         # 比例: pos : file : cache_hit = 4 : 2 : 2
-        pos_dim = embed_dim // 2       # 64 for embed_dim=128
-        file_dim = embed_dim // 4      # 32 for embed_dim=128
-        cache_dim = embed_dim // 4     # 32 for embed_dim=128
+        pos_dim = embed_dim // 2
+        file_dim = embed_dim // 4
+        cache_dim = embed_dim // 4
 
         # 位置特征 embedding (3D -> pos_dim)
         self.pos_embed = layer_init(nn.Linear(3, pos_dim))
@@ -70,9 +70,9 @@ class NeighborEmbedding(nn.Module):
         super().__init__()
         # 邻居特征: pos(3) + cache(NUM_FILES) + immediate_help(1) + complementarity(1) + is_active(1)
         # 分配 embedding 维度：cache 信息最丰富，分配更多维度
-        pos_dim = embed_dim // 4       # 16 for embed_dim=64
-        cache_dim = embed_dim // 2     # 32 for embed_dim=64
-        processed_dim = embed_dim // 4  # 16 for embed_dim=64
+        pos_dim = embed_dim // 4
+        cache_dim = embed_dim // 2
+        processed_dim = embed_dim // 4
 
         self.pos_embed = layer_init(nn.Linear(3, pos_dim))
         self.cache_embed = layer_init(nn.Linear(num_files, cache_dim))
@@ -283,7 +283,7 @@ def parse_observation(obs: torch.Tensor) -> dict:
     idx += config.MAX_UAV_NEIGHBORS * config.NEIGHBOR_STATE_DIM
 
     # 邻居数量
-    neighbor_count = obs[:, idx:idx + 1].squeeze(-1)
+    neighbor_count = obs[:, idx:idx + 1].squeeze(-1).round().clamp(0, config.MAX_UAV_NEIGHBORS)
     idx += 1
 
     # UE 特征
@@ -292,11 +292,13 @@ def parse_observation(obs: torch.Tensor) -> dict:
     idx += config.MAX_ASSOCIATED_UES * config.UE_STATE_DIM
 
     # UE 数量
-    ue_count = obs[:, idx:idx + 1].squeeze(-1)
+    ue_count = obs[:, idx:idx + 1].squeeze(-1).round().clamp(0, config.MAX_ASSOCIATED_UES)
 
     # 生成 mask
     neighbor_mask = torch.arange(config.MAX_UAV_NEIGHBORS, device=obs.device).expand(batch_size, -1)
-    neighbor_mask = (neighbor_mask < neighbor_count.unsqueeze(-1)).float()
+    neighbor_slot_mask = neighbor_mask < neighbor_count.unsqueeze(-1)
+    neighbor_active_mask = neighbor_features[:, :, -1] > 0.5
+    neighbor_mask = (neighbor_slot_mask & neighbor_active_mask).float()
 
     ue_mask = torch.arange(config.MAX_ASSOCIATED_UES, device=obs.device).expand(batch_size, -1)
     ue_mask = (ue_mask < ue_count.unsqueeze(-1)).float()
@@ -318,7 +320,7 @@ class AttentionEncoder(nn.Module):
 
     Architecture:
     1. Parse observation → structured tensors
-    2. UAV Embedding → [batch, 64]
+    2. UAV Embedding → [batch, ATTENTION_UAV_EMBED_DIM]
     3. UAV summary query projected to per-branch dimensions
     4. UE / Neighbor Embedding + stacked residual CrossAttention
     5. Empty entity branches explicitly zeroed
@@ -370,5 +372,3 @@ class AttentionEncoder(nn.Module):
         neighbor_attn = zero_empty_summary(neighbor_attn, parsed['neighbor_mask'])
 
         return torch.cat([uav_emb, ue_attn, neighbor_attn], dim=-1)
-
-

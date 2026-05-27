@@ -18,7 +18,7 @@ import os
 class MASAC(MARLModel):
     """MADDPG + SAC style MASAC implementation"""
     CHECKPOINT_FORMAT = "shared_masac_configurable_critic"
-    CHECKPOINT_VERSION = 2
+    CHECKPOINT_VERSION = 3
 
     def __init__(self, model_name: str, num_agents: int, obs_dim: int, action_dim: int, device: str) -> None:
         super().__init__(model_name, num_agents, obs_dim, action_dim, device)
@@ -91,7 +91,7 @@ class MASAC(MARLModel):
         actions_tensor: torch.Tensor,
         agent_mask_tensor: torch.Tensor,
     ) -> torch.Tensor:
-        if self.critic_mode in ("mlp", "local_attention"):
+        if self.critic_mode == "mlp":
             batch_size = obs_tensor.shape[0]
             return critic(
                 obs_tensor.reshape(batch_size, -1),
@@ -262,6 +262,10 @@ class MASAC(MARLModel):
         }
 
     def _validate_hyperparameters(self) -> None:
+        if config.MASAC_CRITIC_HIDDEN_DIM <= 0:
+            raise ValueError(
+                f"MASAC_CRITIC_HIDDEN_DIM must be positive, got {config.MASAC_CRITIC_HIDDEN_DIM}"
+            )
         if config.ALPHA_MIN <= 0.0:
             raise ValueError(f"ALPHA_MIN must be positive, got {config.ALPHA_MIN}")
         if config.TARGET_ENTROPY_SCALE <= 0.0:
@@ -291,6 +295,7 @@ class MASAC(MARLModel):
                 "num_agents": self.num_agents,
                 "use_attention_actor": self.use_attention_actor,
                 "critic_mode": self.critic_mode,
+                "architecture": self._checkpoint_architecture(),
                 "model": self.state_dict(),
                 "actor_optimizer": self.actor_optimizer.state_dict(),
                 "critic_1_optimizer": self.critic_1_optimizer.state_dict(),
@@ -313,6 +318,7 @@ class MASAC(MARLModel):
         checkpoint_num_agents = checkpoint.get("num_agents")
         saved_critic_mode = checkpoint.get("critic_mode", "mlp")
         saved_use_attention_actor = checkpoint.get("use_attention_actor", False)
+        saved_architecture = checkpoint.get("architecture")
 
         if checkpoint_format != self.CHECKPOINT_FORMAT:
             raise ValueError(
@@ -340,6 +346,12 @@ class MASAC(MARLModel):
                 f"expected use_attention_actor={self.use_attention_actor}, "
                 f"got {saved_use_attention_actor!r}"
             )
+        expected_architecture = self._checkpoint_architecture()
+        if saved_architecture != expected_architecture:
+            raise ValueError(
+                "Incompatible MASAC checkpoint architecture: "
+                f"expected {expected_architecture!r}, got {saved_architecture!r}"
+            )
         self.load_state_dict(checkpoint["model"])
         self.actor_optimizer.load_state_dict(checkpoint["actor_optimizer"])
         self.critic_1_optimizer.load_state_dict(checkpoint["critic_1_optimizer"])
@@ -353,6 +365,38 @@ class MASAC(MARLModel):
     def _set_critic_grads(self, enabled: bool) -> None:
         self.critic_1.requires_grad_(enabled)
         self.critic_2.requires_grad_(enabled)
+
+    def _checkpoint_architecture(self) -> dict[str, int]:
+        architecture = {
+            "obs_dim": self.obs_dim,
+            "action_dim": self.action_dim,
+            "mlp_hidden_dim": config.MLP_HIDDEN_DIM,
+            "masac_critic_hidden_dim": config.MASAC_CRITIC_HIDDEN_DIM,
+        }
+
+        uses_local_attention = self.use_attention_actor or self.critic_mode in (
+            "local_attention",
+            "agent_self_attention",
+        )
+        if uses_local_attention:
+            architecture.update({
+                "attention_embed_dim": config.ATTENTION_EMBED_DIM,
+                "attention_uav_embed_dim": config.ATTENTION_UAV_EMBED_DIM,
+                "attention_neighbor_dim": config.ATTENTION_NEIGHBOR_DIM,
+                "attention_num_heads": config.ATTENTION_NUM_HEADS,
+                "attention_num_layers": config.ATTENTION_NUM_LAYERS,
+            })
+
+        if self.critic_mode == "agent_self_attention":
+            architecture.update({
+                "masac_agent_id_dim": config.MASAC_AGENT_ID_DIM,
+                "masac_agent_attention_dim": config.MASAC_AGENT_ATTENTION_DIM,
+                "masac_agent_attention_heads": config.MASAC_AGENT_ATTENTION_HEADS,
+                "masac_agent_attention_layers": config.MASAC_AGENT_ATTENTION_LAYERS,
+                "masac_agent_attention_ffn_mult": config.MASAC_AGENT_ATTENTION_FFN_MULT,
+            })
+
+        return architecture
 
     def _optimize_actor(
         self,
@@ -374,18 +418,29 @@ class MASAC(MARLModel):
         )
         self._set_critic_grads(enabled=False)
         try:
-            q1_pred: torch.Tensor = self._critic_values(
-                self.critic_1, obs_tensor, pred_actions_tensor, active_mask_tensor,
-            )
-            q2_pred: torch.Tensor = self._critic_values(
-                self.critic_2, obs_tensor, pred_actions_tensor, active_mask_tensor,
-            )
-            self._validate_per_agent_tensor("critic_1", q1_pred)
-            self._validate_per_agent_tensor("critic_2", q2_pred)
-            self._require_same_shape("critic_1", q1_pred, "masked_log_probs", masked_log_probs)
-            self._require_same_shape("critic_2", q2_pred, "masked_log_probs", masked_log_probs)
-            min_q_pred: torch.Tensor = torch.min(q1_pred, q2_pred)
-            actor_loss: torch.Tensor = masked_mean(alpha.detach() * masked_log_probs - min_q_pred, active_mask_tensor)
+            per_agent_losses: list[torch.Tensor] = []
+            for agent_idx in range(self.num_agents):
+                agent_actions = pred_actions_tensor.detach().clone()
+                agent_actions[:, agent_idx, :] = pred_actions_tensor[:, agent_idx, :]
+                q1_pred = self._critic_values(
+                    self.critic_1,
+                    obs_tensor,
+                    agent_actions,
+                    active_mask_tensor,
+                )
+                q2_pred = self._critic_values(
+                    self.critic_2,
+                    obs_tensor,
+                    agent_actions,
+                    active_mask_tensor,
+                )
+                self._validate_per_agent_tensor("critic_1", q1_pred)
+                self._validate_per_agent_tensor("critic_2", q2_pred)
+                min_q_i = torch.min(q1_pred[:, agent_idx], q2_pred[:, agent_idx])
+                objective_i = alpha.detach() * masked_log_probs[:, agent_idx] - min_q_i
+                per_agent_losses.append(objective_i * active_mask_tensor[:, agent_idx])
+            actor_loss = torch.stack(per_agent_losses, dim=1).sum()
+            actor_loss = actor_loss / active_mask_tensor.sum().clamp_min(1.0)
             self.actor_optimizer.zero_grad(set_to_none=True)
             actor_loss.backward()
             actor_grad_norm = float(torch.nn.utils.clip_grad_norm_(self.actor.parameters(), config.MAX_GRAD_NORM))
