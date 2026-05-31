@@ -37,15 +37,15 @@ def _reshape_share_obs(share_obs: torch.Tensor, num_agents: int, obs_dim: int) -
 
 
 class _GaussianPolicyHead(nn.Module):
-    def __init__(self, input_dim: int, action_dim: int) -> None:
+    def __init__(self, input_dim: int, action_dim: int, hidden_dim: int) -> None:
         super().__init__()
         self.input_norm: nn.LayerNorm = nn.LayerNorm(input_dim)
-        self.fc1: nn.Linear = layer_init(nn.Linear(input_dim, config.MLP_HIDDEN_DIM))
-        self.ln1: nn.LayerNorm = nn.LayerNorm(config.MLP_HIDDEN_DIM)
-        self.fc2: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, config.MLP_HIDDEN_DIM))
-        self.ln2: nn.LayerNorm = nn.LayerNorm(config.MLP_HIDDEN_DIM)
+        self.fc1: nn.Linear = layer_init(nn.Linear(input_dim, hidden_dim))
+        self.ln1: nn.LayerNorm = nn.LayerNorm(hidden_dim)
+        self.fc2: nn.Linear = layer_init(nn.Linear(hidden_dim, hidden_dim))
+        self.ln2: nn.LayerNorm = nn.LayerNorm(hidden_dim)
         self.activation: nn.SiLU = nn.SiLU()
-        self.mean: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, action_dim), std=0.01)
+        self.mean: nn.Linear = layer_init(nn.Linear(hidden_dim, action_dim), std=0.01)
         self.log_std = nn.Parameter(torch.zeros(1, action_dim))
 
     def forward(self, features: torch.Tensor) -> Normal:
@@ -59,17 +59,17 @@ class _GaussianPolicyHead(nn.Module):
 
 
 class _VectorValueHead(nn.Module):
-    def __init__(self, context_dim: int, num_agents: int) -> None:
+    def __init__(self, context_dim: int, num_agents: int, hidden_dim: int) -> None:
         super().__init__()
         self.input_norm: nn.LayerNorm = nn.LayerNorm(context_dim)
-        self.fc1: nn.Linear = layer_init(nn.Linear(context_dim, config.MLP_HIDDEN_DIM))
-        self.ln1: nn.LayerNorm = nn.LayerNorm(config.MLP_HIDDEN_DIM)
-        self.fc2: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, config.MLP_HIDDEN_DIM))
-        self.ln2: nn.LayerNorm = nn.LayerNorm(config.MLP_HIDDEN_DIM)
-        self.fc3: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, config.MLP_HIDDEN_DIM))
-        self.ln3: nn.LayerNorm = nn.LayerNorm(config.MLP_HIDDEN_DIM)
+        self.fc1: nn.Linear = layer_init(nn.Linear(context_dim, hidden_dim))
+        self.ln1: nn.LayerNorm = nn.LayerNorm(hidden_dim)
+        self.fc2: nn.Linear = layer_init(nn.Linear(hidden_dim, hidden_dim))
+        self.ln2: nn.LayerNorm = nn.LayerNorm(hidden_dim)
+        self.fc3: nn.Linear = layer_init(nn.Linear(hidden_dim, hidden_dim))
+        self.ln3: nn.LayerNorm = nn.LayerNorm(hidden_dim)
         self.activation: nn.SiLU = nn.SiLU()
-        self.out: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, num_agents), std=1.0)
+        self.out: nn.Linear = layer_init(nn.Linear(hidden_dim, num_agents), std=1.0)
 
     def forward(self, context: torch.Tensor) -> torch.Tensor:
         x: torch.Tensor = self.input_norm(context)
@@ -82,7 +82,7 @@ class _VectorValueHead(nn.Module):
 class ActorNetwork(nn.Module):
     def __init__(self, obs_dim: int, action_dim: int) -> None:
         super().__init__()
-        self.policy = _GaussianPolicyHead(obs_dim, action_dim)
+        self.policy = _GaussianPolicyHead(obs_dim, action_dim, config.BASE_ACTOR_HIDDEN_DIM)
 
     def forward(self, obs: torch.Tensor) -> Normal:
         return self.policy(obs)
@@ -93,7 +93,7 @@ class AttentionActorNetwork(nn.Module):
         super().__init__()
         _validate_attention_obs_dim(obs_dim)
         self.encoder = AttentionEncoder()
-        self.policy = _GaussianPolicyHead(self.encoder.output_dim, action_dim)
+        self.policy = _GaussianPolicyHead(self.encoder.output_dim, action_dim, config.ATTENTION_ACTOR_HIDDEN_DIM)
 
     def forward(self, obs: torch.Tensor) -> Normal:
         encoded = self.encoder(obs)
@@ -106,7 +106,7 @@ class CriticNetwork(nn.Module):
         self.num_agents = num_agents
         self.obs_dim = obs_dim
         self.share_obs_dim = num_agents * obs_dim
-        self.value_head = _VectorValueHead(self.share_obs_dim, num_agents)
+        self.value_head = _VectorValueHead(self.share_obs_dim, num_agents, config.BASE_CRITIC_HIDDEN_DIM)
 
     def forward(self, share_obs: torch.Tensor) -> torch.Tensor:
         _validate_share_obs(share_obs, self.num_agents, self.obs_dim)
@@ -121,7 +121,11 @@ class AttentionCriticNetwork(nn.Module):
         self.obs_dim = obs_dim
         self.encoder = AttentionEncoder()
         self.encoded_share_obs_dim = num_agents * self.encoder.output_dim
-        self.value_head = _VectorValueHead(self.encoded_share_obs_dim, num_agents)
+        self.value_head = _VectorValueHead(
+            self.encoded_share_obs_dim,
+            num_agents,
+            config.ATTENTION_CRITIC_HIDDEN_DIM,
+        )
 
     def forward(self, share_obs: torch.Tensor) -> torch.Tensor:
         joint_obs = _reshape_share_obs(share_obs, self.num_agents, self.obs_dim)

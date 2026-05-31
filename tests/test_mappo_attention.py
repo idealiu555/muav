@@ -66,9 +66,9 @@ def test_non_attention_actor_outputs_distribution_from_raw_obs() -> None:
     assert tuple(dist.stddev.shape) == (config.NUM_UAVS, config.ACTION_DIM)
     assert actor.policy.fc1.in_features == config.OBS_DIM_SINGLE
     assert actor.policy.input_norm.normalized_shape == (config.OBS_DIM_SINGLE,)
-    assert actor.policy.fc2.out_features == config.MLP_HIDDEN_DIM
-    assert actor.policy.ln1.normalized_shape == (config.MLP_HIDDEN_DIM,)
-    assert actor.policy.ln2.normalized_shape == (config.MLP_HIDDEN_DIM,)
+    assert actor.policy.fc2.out_features == config.BASE_ACTOR_HIDDEN_DIM
+    assert actor.policy.ln1.normalized_shape == (config.BASE_ACTOR_HIDDEN_DIM,)
+    assert actor.policy.ln2.normalized_shape == (config.BASE_ACTOR_HIDDEN_DIM,)
     assert isinstance(actor.policy.activation, torch.nn.SiLU)
 
 
@@ -103,9 +103,9 @@ def test_critic_accepts_flattened_share_obs_and_returns_vector_values() -> None:
     assert tuple(values.shape) == (4, config.NUM_UAVS)
     assert critic.value_head.fc1.in_features == config.NUM_UAVS * config.OBS_DIM_SINGLE
     assert critic.value_head.input_norm.normalized_shape == (config.NUM_UAVS * config.OBS_DIM_SINGLE,)
-    assert critic.value_head.fc3.out_features == config.MLP_HIDDEN_DIM
-    assert critic.value_head.ln1.normalized_shape == (config.MLP_HIDDEN_DIM,)
-    assert critic.value_head.ln3.normalized_shape == (config.MLP_HIDDEN_DIM,)
+    assert critic.value_head.fc3.out_features == config.BASE_CRITIC_HIDDEN_DIM
+    assert critic.value_head.ln1.normalized_shape == (config.BASE_CRITIC_HIDDEN_DIM,)
+    assert critic.value_head.ln3.normalized_shape == (config.BASE_CRITIC_HIDDEN_DIM,)
     assert isinstance(critic.value_head.activation, torch.nn.SiLU)
 
 

@@ -18,7 +18,7 @@ import os
 class MASAC(MARLModel):
     """MADDPG + SAC style MASAC implementation"""
     CHECKPOINT_FORMAT = "shared_masac_configurable_critic"
-    CHECKPOINT_VERSION = 3
+    CHECKPOINT_VERSION = 4
 
     def __init__(self, model_name: str, num_agents: int, obs_dim: int, action_dim: int, device: str) -> None:
         super().__init__(model_name, num_agents, obs_dim, action_dim, device)
@@ -261,10 +261,56 @@ class MASAC(MARLModel):
             "q_value_mean": float(valid_q.mean().item()) if valid_q.numel() else 0.0,
         }
 
+    @torch.no_grad()
+    def get_debug_diagnostics(self, batch: ExperienceBatch) -> dict[str, float]:
+        diagnostics = {}
+        if self.use_attention_actor:
+            diagnostics["latest_clipped_actor_encoder_grad_norm"] = self._grad_norm(self.actor.encoder)
+        if self.critic_mode in ("local_attention", "agent_self_attention"):
+            diagnostics["latest_clipped_critic_encoder_grad_norm"] = max(
+                self._grad_norm(self.critic_1.encoder),
+                self._grad_norm(self.critic_2.encoder),
+            )
+        if self.critic_mode == "agent_self_attention":
+            obs_tensor = torch.as_tensor(batch["obs"], dtype=torch.float32, device=self.device)
+            actions_tensor = torch.as_tensor(batch["actions"], dtype=torch.float32, device=self.device)
+            active_mask_tensor = torch.as_tensor(batch["active_mask"], dtype=torch.float32, device=self.device)
+            diagnostics.update(self.critic_1.attention_diagnostics(obs_tensor, actions_tensor, active_mask_tensor))
+        return diagnostics
+
+    @staticmethod
+    def _grad_norm(module: nn.Module | None) -> float:
+        if module is None:
+            return 0.0
+        squared_norm = 0.0
+        for parameter in module.parameters():
+            if parameter.grad is not None:
+                squared_norm += float(parameter.grad.detach().pow(2).sum().item())
+        return float(np.sqrt(squared_norm))
+
     def _validate_hyperparameters(self) -> None:
-        if config.MASAC_CRITIC_HIDDEN_DIM <= 0:
+        if config.MASAC_ATTENTION_ACTOR and config.ATTENTION_ACTOR_HIDDEN_DIM <= 0:
             raise ValueError(
-                f"MASAC_CRITIC_HIDDEN_DIM must be positive, got {config.MASAC_CRITIC_HIDDEN_DIM}"
+                "ATTENTION_ACTOR_HIDDEN_DIM must be positive, "
+                f"got {config.ATTENTION_ACTOR_HIDDEN_DIM}"
+            )
+        if not config.MASAC_ATTENTION_ACTOR and config.BASE_ACTOR_HIDDEN_DIM <= 0:
+            raise ValueError(
+                f"BASE_ACTOR_HIDDEN_DIM must be positive, got {config.BASE_ACTOR_HIDDEN_DIM}"
+            )
+        critic_hidden_dim = (
+            config.BASE_CRITIC_HIDDEN_DIM
+            if config.MASAC_CRITIC_MODE == "mlp"
+            else config.ATTENTION_CRITIC_HIDDEN_DIM
+        )
+        if critic_hidden_dim <= 0:
+            critic_hidden_dim_name = (
+                "BASE_CRITIC_HIDDEN_DIM"
+                if config.MASAC_CRITIC_MODE == "mlp"
+                else "ATTENTION_CRITIC_HIDDEN_DIM"
+            )
+            raise ValueError(
+                f"{critic_hidden_dim_name} must be positive, got {critic_hidden_dim}"
             )
         if config.ALPHA_MIN <= 0.0:
             raise ValueError(f"ALPHA_MIN must be positive, got {config.ALPHA_MIN}")
@@ -315,10 +361,6 @@ class MASAC(MARLModel):
         checkpoint = torch.load(checkpoint_file, map_location=self.device)
         checkpoint_format = checkpoint.get("checkpoint_format")
         checkpoint_version = checkpoint.get("checkpoint_version")
-        checkpoint_num_agents = checkpoint.get("num_agents")
-        saved_critic_mode = checkpoint.get("critic_mode", "mlp")
-        saved_use_attention_actor = checkpoint.get("use_attention_actor", False)
-        saved_architecture = checkpoint.get("architecture")
 
         if checkpoint_format != self.CHECKPOINT_FORMAT:
             raise ValueError(
@@ -330,6 +372,14 @@ class MASAC(MARLModel):
                 "Incompatible MASAC checkpoint version: "
                 f"expected {self.CHECKPOINT_VERSION}, got {checkpoint_version!r}"
             )
+        required_metadata = ("num_agents", "critic_mode", "use_attention_actor", "architecture")
+        missing_metadata = [key for key in required_metadata if key not in checkpoint]
+        if missing_metadata:
+            raise ValueError(f"MASAC checkpoint missing required metadata: {', '.join(missing_metadata)}")
+        checkpoint_num_agents = checkpoint["num_agents"]
+        saved_critic_mode = checkpoint["critic_mode"]
+        saved_use_attention_actor = checkpoint["use_attention_actor"]
+        saved_architecture = checkpoint["architecture"]
         if checkpoint_num_agents != self.num_agents:
             raise ValueError(
                 "Incompatible MASAC checkpoint agent count: "
@@ -370,13 +420,21 @@ class MASAC(MARLModel):
         architecture = {
             "obs_dim": self.obs_dim,
             "action_dim": self.action_dim,
-            "mlp_hidden_dim": config.MLP_HIDDEN_DIM,
-            "masac_critic_hidden_dim": config.MASAC_CRITIC_HIDDEN_DIM,
         }
+
+        if self.use_attention_actor:
+            architecture["attention_actor_hidden_dim"] = config.ATTENTION_ACTOR_HIDDEN_DIM
+        else:
+            architecture["base_actor_hidden_dim"] = config.BASE_ACTOR_HIDDEN_DIM
 
         uses_local_attention = self.use_attention_actor or self.critic_mode in (
             "local_attention",
             "agent_self_attention",
+        )
+        architecture["critic_hidden_dim"] = (
+            config.BASE_CRITIC_HIDDEN_DIM
+            if self.critic_mode == "mlp"
+            else config.ATTENTION_CRITIC_HIDDEN_DIM
         )
         if uses_local_attention:
             architecture.update({
@@ -385,6 +443,7 @@ class MASAC(MARLModel):
                 "attention_neighbor_dim": config.ATTENTION_NEIGHBOR_DIM,
                 "attention_num_heads": config.ATTENTION_NUM_HEADS,
                 "attention_num_layers": config.ATTENTION_NUM_LAYERS,
+                "attention_count_embed_dim": config.ATTENTION_COUNT_EMBED_DIM,
             })
 
         if self.critic_mode == "agent_self_attention":

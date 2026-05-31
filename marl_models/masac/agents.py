@@ -35,14 +35,15 @@ def _validate_trailing_dim(name: str, tensor: torch.Tensor, expected_dim: int) -
 class ActorNetwork(nn.Module):
     def __init__(self, obs_dim: int, action_dim: int) -> None:
         super(ActorNetwork, self).__init__()
-        self.fc1: nn.Linear = layer_init(nn.Linear(obs_dim, config.MLP_HIDDEN_DIM))
-        self.ln1: nn.LayerNorm = nn.LayerNorm(config.MLP_HIDDEN_DIM)
+        hidden_dim = config.BASE_ACTOR_HIDDEN_DIM
+        self.fc1: nn.Linear = layer_init(nn.Linear(obs_dim, hidden_dim))
+        self.ln1: nn.LayerNorm = nn.LayerNorm(hidden_dim)
         self.act1: nn.SiLU = nn.SiLU()
-        self.fc2: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, config.MLP_HIDDEN_DIM))
-        self.ln2: nn.LayerNorm = nn.LayerNorm(config.MLP_HIDDEN_DIM)
+        self.fc2: nn.Linear = layer_init(nn.Linear(hidden_dim, hidden_dim))
+        self.ln2: nn.LayerNorm = nn.LayerNorm(hidden_dim)
         self.act2: nn.SiLU = nn.SiLU()
-        self.mean: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, action_dim), std=0.01)
-        self.log_std: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, action_dim), std=0.01)
+        self.mean: nn.Linear = layer_init(nn.Linear(hidden_dim, action_dim), std=0.01)
+        self.log_std: nn.Linear = layer_init(nn.Linear(hidden_dim, action_dim), std=0.01)
 
     def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         x: torch.Tensor = self.act1(self.ln1(self.fc1(obs)))
@@ -77,14 +78,15 @@ class AttentionActorNetwork(nn.Module):
         _validate_attention_obs_dim(obs_dim)
         self.obs_dim = obs_dim
         self.encoder = AttentionEncoder()
-        self.fc1: nn.Linear = layer_init(nn.Linear(self.encoder.output_dim, config.MLP_HIDDEN_DIM))
-        self.ln1: nn.LayerNorm = nn.LayerNorm(config.MLP_HIDDEN_DIM)
+        hidden_dim = config.ATTENTION_ACTOR_HIDDEN_DIM
+        self.fc1: nn.Linear = layer_init(nn.Linear(self.encoder.output_dim, hidden_dim))
+        self.ln1: nn.LayerNorm = nn.LayerNorm(hidden_dim)
         self.act1: nn.SiLU = nn.SiLU()
-        self.fc2: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, config.MLP_HIDDEN_DIM))
-        self.ln2: nn.LayerNorm = nn.LayerNorm(config.MLP_HIDDEN_DIM)
+        self.fc2: nn.Linear = layer_init(nn.Linear(hidden_dim, hidden_dim))
+        self.ln2: nn.LayerNorm = nn.LayerNorm(hidden_dim)
         self.act2: nn.SiLU = nn.SiLU()
-        self.mean: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, action_dim), std=0.01)
-        self.log_std: nn.Linear = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, action_dim), std=0.01)
+        self.mean: nn.Linear = layer_init(nn.Linear(hidden_dim, action_dim), std=0.01)
+        self.log_std: nn.Linear = layer_init(nn.Linear(hidden_dim, action_dim), std=0.01)
 
     def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         _validate_rank("obs", obs, 2)
@@ -114,15 +116,14 @@ class CriticNetwork(nn.Module):
         super(CriticNetwork, self).__init__()
         self.total_obs_dim = total_obs_dim
         self.total_action_dim = total_action_dim
-        self.fc1: nn.Linear = layer_init(nn.Linear(total_obs_dim + total_action_dim, config.MASAC_CRITIC_HIDDEN_DIM))
-        self.ln1: nn.LayerNorm = nn.LayerNorm(config.MASAC_CRITIC_HIDDEN_DIM)
+        hidden_dim = config.BASE_CRITIC_HIDDEN_DIM
+        self.fc1: nn.Linear = layer_init(nn.Linear(total_obs_dim + total_action_dim, hidden_dim))
+        self.ln1: nn.LayerNorm = nn.LayerNorm(hidden_dim)
         self.act1: nn.SiLU = nn.SiLU()
-        self.fc2: nn.Linear = layer_init(
-            nn.Linear(config.MASAC_CRITIC_HIDDEN_DIM, config.MASAC_CRITIC_HIDDEN_DIM)
-        )
-        self.ln2: nn.LayerNorm = nn.LayerNorm(config.MASAC_CRITIC_HIDDEN_DIM)
+        self.fc2: nn.Linear = layer_init(nn.Linear(hidden_dim, hidden_dim))
+        self.ln2: nn.LayerNorm = nn.LayerNorm(hidden_dim)
         self.act2: nn.SiLU = nn.SiLU()
-        self.out: nn.Linear = layer_init(nn.Linear(config.MASAC_CRITIC_HIDDEN_DIM, num_agents))
+        self.out: nn.Linear = layer_init(nn.Linear(hidden_dim, num_agents))
 
     def forward(self, joint_obs: torch.Tensor, joint_action: torch.Tensor) -> torch.Tensor:
         _validate_rank("joint_obs", joint_obs, 2)
@@ -148,15 +149,14 @@ class LocalAttentionCriticNetwork(nn.Module):
         self.total_action_dim = num_agents * action_dim
         self.encoder = AttentionEncoder()
         critic_input_dim = num_agents * self.encoder.output_dim + self.total_action_dim
-        self.fc1: nn.Linear = layer_init(nn.Linear(critic_input_dim, config.MASAC_CRITIC_HIDDEN_DIM))
-        self.ln1: nn.LayerNorm = nn.LayerNorm(config.MASAC_CRITIC_HIDDEN_DIM)
+        hidden_dim = config.ATTENTION_CRITIC_HIDDEN_DIM
+        self.fc1: nn.Linear = layer_init(nn.Linear(critic_input_dim, hidden_dim))
+        self.ln1: nn.LayerNorm = nn.LayerNorm(hidden_dim)
         self.act1: nn.SiLU = nn.SiLU()
-        self.fc2: nn.Linear = layer_init(
-            nn.Linear(config.MASAC_CRITIC_HIDDEN_DIM, config.MASAC_CRITIC_HIDDEN_DIM)
-        )
-        self.ln2: nn.LayerNorm = nn.LayerNorm(config.MASAC_CRITIC_HIDDEN_DIM)
+        self.fc2: nn.Linear = layer_init(nn.Linear(hidden_dim, hidden_dim))
+        self.ln2: nn.LayerNorm = nn.LayerNorm(hidden_dim)
         self.act2: nn.SiLU = nn.SiLU()
-        self.out: nn.Linear = layer_init(nn.Linear(config.MASAC_CRITIC_HIDDEN_DIM, num_agents))
+        self.out: nn.Linear = layer_init(nn.Linear(hidden_dim, num_agents))
 
     def forward(
         self,
@@ -233,12 +233,27 @@ class AgentSelfAttentionBlock(nn.Module):
             layer_init(nn.Linear(dim * ffn_mult, dim)),
         )
 
-    def forward(self, x: torch.Tensor, key_padding_mask: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        key_padding_mask: torch.Tensor | None = None,
+        *,
+        need_weights: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         y = self.norm1(x)
-        y, _ = self.attn(y, y, y, key_padding_mask=key_padding_mask, need_weights=False)
+        y, weights = self.attn(
+            y,
+            y,
+            y,
+            key_padding_mask=key_padding_mask,
+            need_weights=need_weights,
+            average_attn_weights=False,
+        )
         x = x + y
         z = self.norm2(x)
         x = x + self.ffn(z)
+        if need_weights:
+            return x, weights
         return x
 
 
@@ -248,12 +263,20 @@ class AgentSelfAttentionCriticNetwork(nn.Module):
     Encodes each agent's local observation via a shared AttentionEncoder, builds
     per-agent tokens from local encoding + action + learned agent-id embedding, applies
     masked agent-level self-attention, and outputs per-agent Q values through a shared
-    Q head over the attended context plus a direct action input.
+    Q head over the attended context and direct action input.
     """
 
     def __init__(self, num_agents: int, obs_dim: int, action_dim: int) -> None:
         super().__init__()
         _validate_attention_obs_dim(obs_dim)
+        if config.MASAC_AGENT_ATTENTION_DIM <= 0:
+            raise ValueError(
+                f"MASAC_AGENT_ATTENTION_DIM must be > 0, got {config.MASAC_AGENT_ATTENTION_DIM}"
+            )
+        if config.MASAC_AGENT_ATTENTION_HEADS <= 0:
+            raise ValueError(
+                f"MASAC_AGENT_ATTENTION_HEADS must be > 0, got {config.MASAC_AGENT_ATTENTION_HEADS}"
+            )
         if config.MASAC_AGENT_ATTENTION_DIM % config.MASAC_AGENT_ATTENTION_HEADS != 0:
             raise ValueError(
                 f"MASAC_AGENT_ATTENTION_DIM ({config.MASAC_AGENT_ATTENTION_DIM}) "
@@ -263,6 +286,10 @@ class AgentSelfAttentionCriticNetwork(nn.Module):
             raise ValueError(f"MASAC_AGENT_ID_DIM must be > 0, got {config.MASAC_AGENT_ID_DIM}")
         if config.MASAC_AGENT_ATTENTION_LAYERS < 1:
             raise ValueError(f"MASAC_AGENT_ATTENTION_LAYERS must be >= 1, got {config.MASAC_AGENT_ATTENTION_LAYERS}")
+        if config.MASAC_AGENT_ATTENTION_FFN_MULT <= 0:
+            raise ValueError(
+                f"MASAC_AGENT_ATTENTION_FFN_MULT must be > 0, got {config.MASAC_AGENT_ATTENTION_FFN_MULT}"
+            )
 
         self.num_agents = num_agents
         self.obs_dim = obs_dim
@@ -287,14 +314,15 @@ class AgentSelfAttentionCriticNetwork(nn.Module):
         ])
 
         q_input_dim = config.MASAC_AGENT_ATTENTION_DIM + action_dim
+        hidden_dim = config.ATTENTION_CRITIC_HIDDEN_DIM
         self.q_head = nn.Sequential(
-            layer_init(nn.Linear(q_input_dim, config.MASAC_CRITIC_HIDDEN_DIM)),
-            nn.LayerNorm(config.MASAC_CRITIC_HIDDEN_DIM),
+            layer_init(nn.Linear(q_input_dim, hidden_dim)),
+            nn.LayerNorm(hidden_dim),
             nn.SiLU(),
-            layer_init(nn.Linear(config.MASAC_CRITIC_HIDDEN_DIM, config.MASAC_CRITIC_HIDDEN_DIM)),
-            nn.LayerNorm(config.MASAC_CRITIC_HIDDEN_DIM),
+            layer_init(nn.Linear(hidden_dim, hidden_dim)),
+            nn.LayerNorm(hidden_dim),
             nn.SiLU(),
-            layer_init(nn.Linear(config.MASAC_CRITIC_HIDDEN_DIM, 1)),
+            layer_init(nn.Linear(hidden_dim, 1)),
         )
 
     def forward(
@@ -303,6 +331,24 @@ class AgentSelfAttentionCriticNetwork(nn.Module):
         actions: torch.Tensor,
         agent_mask: torch.Tensor,
     ) -> torch.Tensor:
+        self._validate_inputs(obs, actions, agent_mask)
+        x, valid_query_mask, safe_key_padding_mask = self._build_tokens(obs, actions, agent_mask)
+        for block in self.attention_blocks:
+            x = block(x, safe_key_padding_mask)
+
+        context = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        context = torch.where(valid_query_mask.unsqueeze(-1), context, torch.zeros_like(context))
+
+        q_input = torch.cat([context, actions], dim=-1)
+        q_values = self.q_head(q_input).squeeze(-1)
+        return torch.where(valid_query_mask, q_values, torch.zeros_like(q_values))
+
+    def _validate_inputs(
+        self,
+        obs: torch.Tensor,
+        actions: torch.Tensor,
+        agent_mask: torch.Tensor,
+    ) -> None:
         _validate_rank("obs", obs, 3)
         _validate_rank("actions", actions, 3)
         _validate_rank("agent_mask", agent_mask, 2)
@@ -319,36 +365,48 @@ class AgentSelfAttentionCriticNetwork(nn.Module):
         _validate_trailing_dim("obs", obs, self.obs_dim)
         _validate_trailing_dim("actions", actions, self.action_dim)
 
+    def _build_tokens(
+        self,
+        obs: torch.Tensor,
+        actions: torch.Tensor,
+        agent_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch_size = obs.shape[0]
-
-        # --- batched local entity encoding ---
         obs_flat = obs.reshape(batch_size * self.num_agents, self.obs_dim)
         encoded_obs = self.encoder(obs_flat).reshape(batch_size, self.num_agents, -1)
-
-        # --- agent ID embeddings (vectorized) ---
         agent_ids = torch.arange(self.num_agents, device=obs.device)
         agent_id_emb = self.agent_id_embedding(agent_ids).unsqueeze(0).expand(batch_size, -1, -1)
-
-        # --- build tokens ---
         tokens = torch.cat([encoded_obs, actions, agent_id_emb], dim=-1)
         tokens = self.token_projection(tokens)
-
-        # --- self-attention with safe masking ---
         valid_query_mask = agent_mask > 0
         key_padding_mask = ~valid_query_mask
-        all_inactive = key_padding_mask.all(dim=1)
         safe_key_padding_mask = key_padding_mask.clone()
-        safe_key_padding_mask[all_inactive] = False
+        safe_key_padding_mask[key_padding_mask.all(dim=1)] = False
+        return tokens, valid_query_mask, safe_key_padding_mask
 
-        x = tokens
-        for block in self.attention_blocks:
+    @torch.no_grad()
+    def attention_diagnostics(
+        self,
+        obs: torch.Tensor,
+        actions: torch.Tensor,
+        agent_mask: torch.Tensor,
+    ) -> dict[str, float]:
+        self._validate_inputs(obs, actions, agent_mask)
+        x, valid_query_mask, safe_key_padding_mask = self._build_tokens(obs, actions, agent_mask)
+        for block in self.attention_blocks[:-1]:
             x = block(x, safe_key_padding_mask)
+        _, weights = self.attention_blocks[-1](x, safe_key_padding_mask, need_weights=True)
 
-        # --- zero inactive contexts ---
-        context = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
-        context = torch.where(valid_query_mask.unsqueeze(-1), context, torch.zeros_like(context))
-
-        # Keep a direct action path for SAC actor gradients without duplicating token inputs.
-        q_input = torch.cat([context, actions], dim=-1)
-        q_values = self.q_head(q_input).squeeze(-1)
-        return torch.where(valid_query_mask, q_values, torch.zeros_like(q_values))
+        valid_key_mask = valid_query_mask[:, None, None, :]
+        expanded_query_mask = valid_query_mask[:, None, :, None]
+        valid_weights = weights.masked_fill(~(expanded_query_mask & valid_key_mask), 0.0)
+        valid_query_head_mask = expanded_query_mask.squeeze(-1).expand(-1, weights.shape[1], -1)
+        if not valid_query_head_mask.any():
+            return {"agent_attention_entropy": 0.0, "agent_attention_max_weight": 0.0}
+        entropy_per_query = -(
+            valid_weights * valid_weights.clamp_min(config.EPSILON).log()
+        ).sum(dim=-1)
+        return {
+            "agent_attention_entropy": float(entropy_per_query[valid_query_head_mask].mean().item()),
+            "agent_attention_max_weight": float(valid_weights.max().item()),
+        }

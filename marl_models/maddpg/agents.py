@@ -14,13 +14,14 @@ def layer_init(layer: nn.Linear, std: float = np.sqrt(2), bias_const: float = 0.
 class ActorNetwork(nn.Module):
     def __init__(self, obs_dim: int, action_dim: int) -> None:
         super().__init__()
-        self.fc1 = layer_init(nn.Linear(obs_dim, config.MLP_HIDDEN_DIM))
-        self.ln1 = nn.LayerNorm(config.MLP_HIDDEN_DIM)
+        hidden_dim = config.BASE_ACTOR_HIDDEN_DIM
+        self.fc1 = layer_init(nn.Linear(obs_dim, hidden_dim))
+        self.ln1 = nn.LayerNorm(hidden_dim)
         self.act1 = nn.SiLU()
-        self.fc2 = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, config.MLP_HIDDEN_DIM))
-        self.ln2 = nn.LayerNorm(config.MLP_HIDDEN_DIM)
+        self.fc2 = layer_init(nn.Linear(hidden_dim, hidden_dim))
+        self.ln2 = nn.LayerNorm(hidden_dim)
         self.act2 = nn.SiLU()
-        self.out = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, action_dim), std=0.01)
+        self.out = layer_init(nn.Linear(hidden_dim, action_dim), std=0.01)
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         x = self.act1(self.ln1(self.fc1(obs)))
@@ -31,13 +32,14 @@ class ActorNetwork(nn.Module):
 class CriticNetwork(nn.Module):
     def __init__(self, total_obs_dim: int, total_action_dim: int, num_agents: int) -> None:
         super().__init__()
-        self.fc1 = layer_init(nn.Linear(total_obs_dim + total_action_dim, config.MLP_HIDDEN_DIM))
-        self.ln1 = nn.LayerNorm(config.MLP_HIDDEN_DIM)
+        hidden_dim = config.BASE_CRITIC_HIDDEN_DIM
+        self.fc1 = layer_init(nn.Linear(total_obs_dim + total_action_dim, hidden_dim))
+        self.ln1 = nn.LayerNorm(hidden_dim)
         self.act1 = nn.SiLU()
-        self.fc2 = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, config.MLP_HIDDEN_DIM))
-        self.ln2 = nn.LayerNorm(config.MLP_HIDDEN_DIM)
+        self.fc2 = layer_init(nn.Linear(hidden_dim, hidden_dim))
+        self.ln2 = nn.LayerNorm(hidden_dim)
         self.act2 = nn.SiLU()
-        self.out = layer_init(nn.Linear(config.MLP_HIDDEN_DIM, num_agents))
+        self.out = layer_init(nn.Linear(hidden_dim, num_agents))
 
     def forward(self, joint_obs: torch.Tensor, joint_action: torch.Tensor) -> torch.Tensor:
         x = torch.cat([joint_obs, joint_action], dim=1)

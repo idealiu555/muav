@@ -23,6 +23,8 @@ class UEEmbedding(nn.Module):
 
     def __init__(self, num_files: int, embed_dim: int = config.ATTENTION_EMBED_DIM):
         super().__init__()
+        if embed_dim <= 0 or embed_dim % 4 != 0:
+            raise ValueError(f"UEEmbedding embed_dim must be a positive multiple of 4, got {embed_dim}")
         # 根据 embed_dim 动态分配各部分维度
         # 比例: pos : file : cache_hit = 4 : 2 : 2
         pos_dim = embed_dim // 2
@@ -68,6 +70,8 @@ class NeighborEmbedding(nn.Module):
 
     def __init__(self, num_files: int = config.NUM_FILES, embed_dim: int = config.ATTENTION_NEIGHBOR_DIM):
         super().__init__()
+        if embed_dim <= 0 or embed_dim % 4 != 0:
+            raise ValueError(f"NeighborEmbedding embed_dim must be a positive multiple of 4, got {embed_dim}")
         # 邻居特征: pos(3) + cache(NUM_FILES) + immediate_help(1) + complementarity(1) + is_active(1)
         # 分配 embedding 维度：cache 信息最丰富，分配更多维度
         pos_dim = embed_dim // 4
@@ -103,35 +107,38 @@ class NeighborEmbedding(nn.Module):
 
 
 class UAVEmbedding(nn.Module):
-    """将 UAV 状态映射到高维 embedding 空间"""
+    """将 UAV 状态（含实体计数）映射到高维 embedding 空间"""
 
     def __init__(self, num_files: int, embed_dim: int = config.ATTENTION_UAV_EMBED_DIM):
         super().__init__()
         pos_dim = embed_dim // 4
         cache_dim = embed_dim // 2
-        active_dim = embed_dim - pos_dim - cache_dim
-        # 位置 embedding (3D -> pos_dim)
+        count_dim = config.ATTENTION_COUNT_EMBED_DIM
+        active_dim = embed_dim - pos_dim - cache_dim - count_dim
+        if active_dim <= 0:
+            raise ValueError(
+                f"UAVEmbedding embed_dim={embed_dim} is too small for "
+                f"pos_dim={pos_dim} + cache_dim={cache_dim} + count_dim={count_dim}"
+            )
         self.pos_embed = layer_init(nn.Linear(3, pos_dim))
-        # 缓存 embedding (NUM_FILES -> cache_dim)
         self.cache_embed = layer_init(nn.Linear(num_files, cache_dim))
-        # 活跃标记 embedding (1D -> active_dim)
         self.active_embed = layer_init(nn.Linear(1, active_dim))
+        self.count_embed = layer_init(nn.Linear(2, count_dim))
         self.layer_norm = nn.LayerNorm(embed_dim)
         self.output_dim = embed_dim
 
-    def forward(self, uav_pos: torch.Tensor, uav_cache: torch.Tensor, uav_active: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            uav_pos: [batch, 3] 归一化的 UAV 位置
-            uav_cache: [batch, NUM_FILES] 缓存位图
-            uav_active: [batch, 1] 活跃标记
-        Returns:
-            uav_embedding: [batch, embed_dim]
-        """
+    def forward(
+        self,
+        uav_pos: torch.Tensor,
+        uav_cache: torch.Tensor,
+        uav_active: torch.Tensor,
+        normalized_counts: torch.Tensor,
+    ) -> torch.Tensor:
         pos_emb = F.silu(self.pos_embed(uav_pos))
         cache_emb = F.silu(self.cache_embed(uav_cache))
         active_emb = F.silu(self.active_embed(uav_active))
-        uav_emb = torch.cat([pos_emb, cache_emb, active_emb], dim=-1)
+        count_emb = F.silu(self.count_embed(normalized_counts))
+        uav_emb = torch.cat([pos_emb, cache_emb, active_emb, count_emb], dim=-1)
         return self.layer_norm(uav_emb)
 
 
@@ -145,9 +152,12 @@ class CrossAttention(nn.Module):
 
     def __init__(self, query_dim: int, kv_dim: int, num_heads: int = 4):
         super().__init__()
+        if num_heads <= 0:
+            raise ValueError(f"num_heads must be positive, got {num_heads}")
+        if kv_dim % num_heads != 0:
+            raise ValueError(f"kv_dim ({kv_dim}) must be divisible by num_heads ({num_heads})")
         self.num_heads = num_heads
         self.head_dim = kv_dim // num_heads
-        assert kv_dim % num_heads == 0, "kv_dim must be divisible by num_heads"
 
         # Q 来自当前分支的 query/summary，K/V 来自实体 token 序列
         self.q_proj = layer_init(nn.Linear(query_dim, kv_dim))
@@ -213,7 +223,7 @@ class FeedForward(nn.Module):
 
 
 class AttentionBlock(nn.Module):
-    """残差注意力块：使用当前 summary query 迭代细化实体汇总。"""
+    """Pre-LN residual cross-attention block: norm before each sublayer."""
 
     def __init__(self, dim: int, num_heads: int) -> None:
         super().__init__()
@@ -228,9 +238,11 @@ class AttentionBlock(nn.Module):
         kv: torch.Tensor,
         mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        attended = self.attn(query, kv, mask)
-        x = self.norm1(attended + query)
-        x = self.norm2(x + self.ffn(x))
+        q_norm = self.norm1(query)
+        attended = self.attn(q_norm, kv, mask)
+        x = query + attended
+        z = self.norm2(x)
+        x = x + self.ffn(z)
         return x
 
 
@@ -308,8 +320,10 @@ def parse_observation(obs: torch.Tensor) -> dict:
         'uav_cache': uav_cache,
         'uav_active': uav_active,
         'neighbor_features': neighbor_features,
+        'neighbor_count': neighbor_count,
         'neighbor_mask': neighbor_mask,
         'ue_features': ue_features,
+        'ue_count': ue_count,
         'ue_mask': ue_mask,
     }
 
@@ -336,6 +350,22 @@ class AttentionEncoder(nn.Module):
         super().__init__()
         if num_layers <= 0:
             raise ValueError(f"AttentionEncoder requires num_layers > 0, got {num_layers}")
+        if num_heads <= 0:
+            raise ValueError(f"AttentionEncoder num_heads must be positive, got {num_heads}")
+        if ue_embed_dim <= 0 or ue_embed_dim % 4 != 0 or ue_embed_dim % num_heads != 0:
+            raise ValueError(
+                "AttentionEncoder ue_embed_dim must be a positive multiple of 4 "
+                f"and divisible by num_heads, got ue_embed_dim={ue_embed_dim}, num_heads={num_heads}"
+            )
+        if neighbor_out_dim <= 0 or neighbor_out_dim % 4 != 0 or neighbor_out_dim % num_heads != 0:
+            raise ValueError(
+                "AttentionEncoder neighbor_out_dim must be a positive multiple of 4 "
+                f"and divisible by num_heads, got neighbor_out_dim={neighbor_out_dim}, num_heads={num_heads}"
+            )
+        pos_dim = uav_embed_dim // 4
+        cache_dim = uav_embed_dim // 2
+        if uav_embed_dim - pos_dim - cache_dim - config.ATTENTION_COUNT_EMBED_DIM <= 0:
+            raise ValueError(f"AttentionEncoder uav_embed_dim is too small, got {uav_embed_dim}")
 
         self.uav_embed = UAVEmbedding(num_files, uav_embed_dim)
         self.ue_embed = UEEmbedding(num_files, ue_embed_dim)
@@ -357,7 +387,14 @@ class AttentionEncoder(nn.Module):
         """
         parsed = parse_observation(obs)
 
-        uav_emb = self.uav_embed(parsed['uav_pos'], parsed['uav_cache'], parsed['uav_active'])
+        normalized_counts = torch.stack(
+            [
+                (parsed['neighbor_count'] / config.MAX_UAV_NEIGHBORS).clamp(0.0, 1.0),
+                (parsed['ue_count'] / config.MAX_ASSOCIATED_UES).clamp(0.0, 1.0),
+            ],
+            dim=-1,
+        )
+        uav_emb = self.uav_embed(parsed['uav_pos'], parsed['uav_cache'], parsed['uav_active'], normalized_counts)
 
         ue_emb = self.ue_embed(parsed['ue_features'])
         ue_attn = self.ue_query_proj(uav_emb)

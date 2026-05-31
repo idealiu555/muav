@@ -1,5 +1,6 @@
 from pathlib import Path
 import sys
+import types
 
 import numpy as np
 import pytest
@@ -96,10 +97,13 @@ def test_masac_networks_use_silu_not_relu() -> None:
 
 
 def test_masac_actor_and_critic_hidden_dims_are_separate(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(config, "MLP_HIDDEN_DIM", 512)
-    monkeypatch.setattr(config, "MASAC_CRITIC_HIDDEN_DIM", 768, raising=False)
+    monkeypatch.setattr(config, "BASE_ACTOR_HIDDEN_DIM", 192)
+    monkeypatch.setattr(config, "ATTENTION_ACTOR_HIDDEN_DIM", 256)
+    monkeypatch.setattr(config, "BASE_CRITIC_HIDDEN_DIM", 384)
+    monkeypatch.setattr(config, "ATTENTION_CRITIC_HIDDEN_DIM", 512)
 
     actor = ActorNetwork(obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM)
+    attention_actor = AttentionActorNetwork(obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM)
     critic = CriticNetwork(
         total_obs_dim=2 * config.OBS_DIM_SINGLE,
         total_action_dim=2 * config.ACTION_DIM,
@@ -116,14 +120,25 @@ def test_masac_actor_and_critic_hidden_dims_are_separate(monkeypatch: pytest.Mon
         action_dim=config.ACTION_DIM,
     )
 
-    assert actor.fc1.out_features == config.MLP_HIDDEN_DIM
-    assert actor.fc2.out_features == config.MLP_HIDDEN_DIM
-    assert critic.fc1.out_features == config.MASAC_CRITIC_HIDDEN_DIM
-    assert critic.fc2.out_features == config.MASAC_CRITIC_HIDDEN_DIM
-    assert local_attention_critic.fc1.out_features == config.MASAC_CRITIC_HIDDEN_DIM
-    assert local_attention_critic.fc2.out_features == config.MASAC_CRITIC_HIDDEN_DIM
-    assert self_attention_critic.q_head[0].out_features == config.MASAC_CRITIC_HIDDEN_DIM
-    assert self_attention_critic.q_head[3].out_features == config.MASAC_CRITIC_HIDDEN_DIM
+    assert actor.fc1.in_features == config.OBS_DIM_SINGLE
+    assert actor.fc1.out_features == config.BASE_ACTOR_HIDDEN_DIM
+    assert actor.fc2.out_features == config.BASE_ACTOR_HIDDEN_DIM
+    assert actor.mean.out_features == config.ACTION_DIM
+    assert attention_actor.encoder.output_dim == (
+        config.ATTENTION_UAV_EMBED_DIM
+        + config.ATTENTION_EMBED_DIM
+        + config.ATTENTION_NEIGHBOR_DIM
+    )
+    assert attention_actor.fc1.in_features == attention_actor.encoder.output_dim
+    assert attention_actor.fc1.out_features == config.ATTENTION_ACTOR_HIDDEN_DIM
+    assert attention_actor.fc2.out_features == config.ATTENTION_ACTOR_HIDDEN_DIM
+    assert attention_actor.mean.out_features == config.ACTION_DIM
+    assert critic.fc1.out_features == config.BASE_CRITIC_HIDDEN_DIM
+    assert critic.fc2.out_features == config.BASE_CRITIC_HIDDEN_DIM
+    assert local_attention_critic.fc1.out_features == config.ATTENTION_CRITIC_HIDDEN_DIM
+    assert local_attention_critic.fc2.out_features == config.ATTENTION_CRITIC_HIDDEN_DIM
+    assert self_attention_critic.q_head[0].out_features == config.ATTENTION_CRITIC_HIDDEN_DIM
+    assert self_attention_critic.q_head[3].out_features == config.ATTENTION_CRITIC_HIDDEN_DIM
 
 
 def test_masac_attention_networks_forward_with_expected_shapes() -> None:
@@ -441,10 +456,10 @@ def test_masac_rejects_non_positive_target_entropy_scale(monkeypatch: pytest.Mon
         MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
 
 
-def test_masac_rejects_non_positive_critic_hidden_dim(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(config, "MASAC_CRITIC_HIDDEN_DIM", 0, raising=False)
+def test_masac_rejects_non_positive_base_critic_hidden_dim(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "BASE_CRITIC_HIDDEN_DIM", 0)
 
-    with pytest.raises(ValueError, match="MASAC_CRITIC_HIDDEN_DIM"):
+    with pytest.raises(ValueError, match="BASE_CRITIC_HIDDEN_DIM"):
         MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
 
 
@@ -539,14 +554,14 @@ def test_masac_save_writes_checkpoint_metadata(tmp_path: Path, monkeypatch: pyte
     checkpoint = torch.load(save_dir / "masac.pt", map_location="cpu")
 
     assert checkpoint["checkpoint_format"] == "shared_masac_configurable_critic"
-    assert checkpoint["checkpoint_version"] == 3
+    assert checkpoint["checkpoint_version"] == MASAC.CHECKPOINT_VERSION
     assert checkpoint["num_agents"] == 2
     assert checkpoint["use_attention_actor"] is False
     assert checkpoint["critic_mode"] == "mlp"
     assert checkpoint["architecture"]["obs_dim"] == config.OBS_DIM_SINGLE
     assert checkpoint["architecture"]["action_dim"] == config.ACTION_DIM
-    assert checkpoint["architecture"]["mlp_hidden_dim"] == config.MLP_HIDDEN_DIM
-    assert checkpoint["architecture"]["masac_critic_hidden_dim"] == config.MASAC_CRITIC_HIDDEN_DIM
+    assert checkpoint["architecture"]["base_actor_hidden_dim"] == config.BASE_ACTOR_HIDDEN_DIM
+    assert checkpoint["architecture"]["critic_hidden_dim"] == config.BASE_CRITIC_HIDDEN_DIM
     assert "attention_embed_dim" not in checkpoint["architecture"]
     assert "masac_agent_attention_dim" not in checkpoint["architecture"]
 
@@ -557,6 +572,7 @@ def test_masac_save_writes_checkpoint_metadata(tmp_path: Path, monkeypatch: pyte
         ("legacy_masac", 2),
         ("shared_masac_configurable_critic", 1),
         ("shared_masac_configurable_critic", 2),
+        ("shared_masac_configurable_critic", 3),
     ],
 )
 def test_masac_load_rejects_incompatible_checkpoint_metadata(
@@ -588,6 +604,48 @@ def test_masac_load_rejects_incompatible_checkpoint_metadata(
         model.load(str(save_dir))
 
 
+@pytest.mark.parametrize("missing_key", ["critic_mode", "use_attention_actor"])
+def test_masac_load_rejects_missing_current_checkpoint_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    missing_key: str,
+) -> None:
+    monkeypatch.setattr(config, "MASAC_ATTENTION_ACTOR", False)
+    monkeypatch.setattr(config, "MASAC_CRITIC_MODE", "mlp")
+    model = MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
+    save_dir = tmp_path / "checkpoint"
+    save_dir.mkdir()
+    model.save(str(save_dir))
+    checkpoint_path = save_dir / "masac.pt"
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    del checkpoint[missing_key]
+    torch.save(checkpoint, checkpoint_path)
+
+    with pytest.raises(ValueError, match=missing_key):
+        model.load(str(save_dir))
+
+
+def test_masac_mlp_ignores_unused_attention_actor_hidden_dim(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "MASAC_ATTENTION_ACTOR", False)
+    monkeypatch.setattr(config, "MASAC_CRITIC_MODE", "mlp")
+    monkeypatch.setattr(config, "ATTENTION_ACTOR_HIDDEN_DIM", 0)
+
+    model = MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
+
+    assert isinstance(model.actor, ActorNetwork)
+
+
+def test_masac_attention_actor_ignores_unused_raw_actor_hidden_dim(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "MASAC_ATTENTION_ACTOR", True)
+    monkeypatch.setattr(config, "MASAC_CRITIC_MODE", "mlp")
+    monkeypatch.setattr(config, "BASE_ACTOR_HIDDEN_DIM", 0)
+
+    model = MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
+
+    assert isinstance(model.actor, AttentionActorNetwork)
+    assert "base_actor_hidden_dim" not in model._checkpoint_architecture()
+
+
 def test_masac_load_rejects_critic_mode_mismatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(config, "MASAC_ATTENTION_ACTOR", False)
     monkeypatch.setattr(config, "MASAC_CRITIC_MODE", "mlp")
@@ -599,7 +657,7 @@ def test_masac_load_rejects_critic_mode_mismatch(tmp_path: Path, monkeypatch: py
     torch.save(
         {
             "checkpoint_format": "shared_masac_configurable_critic",
-            "checkpoint_version": 3,
+            "checkpoint_version": MASAC.CHECKPOINT_VERSION,
             "num_agents": 2,
             "use_attention_actor": False,
             "critic_mode": "agent_self_attention",
@@ -626,11 +684,11 @@ def test_masac_load_rejects_architecture_mismatch(tmp_path: Path, monkeypatch: p
     save_dir.mkdir()
 
     architecture = model._checkpoint_architecture()
-    architecture["masac_critic_hidden_dim"] = architecture["masac_critic_hidden_dim"] + 1
+    architecture["critic_hidden_dim"] = architecture["critic_hidden_dim"] + 1
     torch.save(
         {
             "checkpoint_format": "shared_masac_configurable_critic",
-            "checkpoint_version": 3,
+            "checkpoint_version": MASAC.CHECKPOINT_VERSION,
             "num_agents": 2,
             "use_attention_actor": False,
             "critic_mode": "mlp",
@@ -741,6 +799,17 @@ def test_masac_agent_self_attention_update_smoke(monkeypatch: pytest.MonkeyPatch
     assert np.isfinite(stats["critic_loss"])
 
 
+def test_masac_attention_actor_with_mlp_critic_update_smoke(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "MASAC_ATTENTION_ACTOR", True)
+    monkeypatch.setattr(config, "MASAC_CRITIC_MODE", "mlp")
+
+    model = MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
+    stats = model.update(_make_batch(4, 2, config.OBS_DIM_SINGLE, config.ACTION_DIM))
+
+    assert np.isfinite(stats["actor_loss"])
+    assert np.isfinite(stats["critic_loss"])
+
+
 def test_masac_attention_actor_with_agent_self_attention_critic_update_smoke(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -752,6 +821,89 @@ def test_masac_attention_actor_with_agent_self_attention_critic_update_smoke(
 
     assert np.isfinite(stats["actor_loss"])
     assert np.isfinite(stats["critic_loss"])
+
+
+def test_agent_self_attention_diagnostics_return_finite_aggregates() -> None:
+    critic = AgentSelfAttentionCriticNetwork(
+        num_agents=3,
+        obs_dim=config.OBS_DIM_SINGLE,
+        action_dim=config.ACTION_DIM,
+    )
+    obs = torch.randn(4, 3, config.OBS_DIM_SINGLE)
+    actions = torch.randn(4, 3, config.ACTION_DIM)
+    mask = torch.tensor([
+        [1.0, 1.0, 1.0],
+        [1.0, 1.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+    ])
+
+    diagnostics = critic.attention_diagnostics(obs, actions, mask)
+
+    assert diagnostics.keys() == {"agent_attention_entropy", "agent_attention_max_weight"}
+    assert torch.isfinite(torch.tensor(list(diagnostics.values()))).all()
+    assert diagnostics["agent_attention_entropy"] >= 0.0
+    assert 0.0 <= diagnostics["agent_attention_max_weight"] <= 1.0
+
+
+def test_masac_debug_diagnostics_are_empty_without_agent_self_attention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config, "MASAC_ATTENTION_ACTOR", False)
+    monkeypatch.setattr(config, "MASAC_CRITIC_MODE", "mlp")
+    model = MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
+
+    assert model.get_debug_diagnostics(_make_batch(4, 2, config.OBS_DIM_SINGLE, config.ACTION_DIM)) == {}
+
+
+def test_masac_debug_diagnostics_report_encoder_gradient_norms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config, "MASAC_ATTENTION_ACTOR", True)
+    monkeypatch.setattr(config, "MASAC_CRITIC_MODE", "agent_self_attention")
+    model = MASAC("masac", num_agents=2, obs_dim=config.OBS_DIM_SINGLE, action_dim=config.ACTION_DIM, device="cpu")
+    batch = _make_batch(4, 2, config.OBS_DIM_SINGLE, config.ACTION_DIM)
+    model.update(batch)
+
+    diagnostics = model.get_debug_diagnostics(batch)
+
+    assert diagnostics["latest_clipped_actor_encoder_grad_norm"] >= 0.0
+    assert diagnostics["latest_clipped_critic_encoder_grad_norm"] >= 0.0
+
+
+def test_agent_self_attention_diagnostics_ignore_inactive_queries(monkeypatch: pytest.MonkeyPatch) -> None:
+    critic = AgentSelfAttentionCriticNetwork(
+        num_agents=2,
+        obs_dim=config.OBS_DIM_SINGLE,
+        action_dim=config.ACTION_DIM,
+    )
+    last_block = critic.attention_blocks[-1]
+
+    def fake_forward(
+        self: torch.nn.Module,
+        x: torch.Tensor,
+        key_padding_mask: torch.Tensor | None = None,
+        *,
+        need_weights: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        _ = self
+        _ = key_padding_mask
+        assert need_weights
+        weights = torch.zeros((1, config.MASAC_AGENT_ATTENTION_HEADS, 2, 2))
+        weights[:, :, 0, 0] = 0.4
+        weights[:, :, 0, 1] = 0.6
+        weights[:, :, 1, 0] = 0.99
+        weights[:, :, 1, 1] = 0.01
+        return x, weights
+
+    monkeypatch.setattr(last_block, "forward", types.MethodType(fake_forward, last_block))
+    diagnostics = critic.attention_diagnostics(
+        torch.randn(1, 2, config.OBS_DIM_SINGLE),
+        torch.randn(1, 2, config.ACTION_DIM),
+        torch.tensor([[1.0, 0.0]]),
+    )
+
+    assert diagnostics["agent_attention_max_weight"] == pytest.approx(0.4)
 
 
 # --- agent self-attention critic unit tests ---
@@ -773,6 +925,29 @@ def test_agent_self_attention_critic_output_shape(monkeypatch: pytest.MonkeyPatc
 
     assert q.shape == (4, 3)
     assert torch.isfinite(q).all()
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("MASAC_AGENT_ATTENTION_DIM", 0),
+        ("MASAC_AGENT_ATTENTION_HEADS", 0),
+        ("MASAC_AGENT_ATTENTION_FFN_MULT", 0),
+    ],
+)
+def test_agent_self_attention_critic_rejects_non_positive_dimensions(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: int,
+) -> None:
+    monkeypatch.setattr(config, name, value)
+
+    with pytest.raises(ValueError, match=name):
+        AgentSelfAttentionCriticNetwork(
+            num_agents=2,
+            obs_dim=config.OBS_DIM_SINGLE,
+            action_dim=config.ACTION_DIM,
+        )
 
 
 def test_agent_self_attention_q_head_uses_context_and_action_only(
