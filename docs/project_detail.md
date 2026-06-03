@@ -1572,18 +1572,15 @@ $$
 python plot_existing_logs.py train_logs/log_data_YYYY-MM-DD_HH-MM-SS.json --output_dir output_dir --smoothing 0.9
 ```
 
-离线绘制多算法对比图：
+离线绘制测试 summary 多算法柱形对比图：
 
 ```bash
 python plot_comparison.py \
-  --files train_logs/log_data_a.json train_logs/log_data_b.json \
-  --labels MAPPO MADDPG \
-  --output comparison_reward.png \
-  --metric reward \
-  --smoothing 0.9
+  --files model_test/comparison_data/summary_masac.json model_test/comparison_data/summary_amasac.json \
+  --labels MASAC AMASAC
 ```
 
-> 注意：多算法对比要求所有输入文件使用相同的 x 轴类型，不能混用 `episode` 与 `update`。
+> 注意：多算法对比读取测试 summary 文件中的 `averages` 字段，默认输出 7 张 SVG 柱形图到 `model_test/comparison_plots/`。
 
 ---
 
@@ -1716,11 +1713,8 @@ python plot_existing_logs.py train_logs/log_data_YYYY-MM-DD_HH-MM-SS.json --outp
 
 ```bash
 python plot_comparison.py \
-  --files train_logs/log_data_a.json train_logs/log_data_b.json \
-  --labels MAPPO MADDPG \
-  --output comparison_reward.png \
-  --metric reward \
-  --smoothing 0.9
+  --files model_test/comparison_data/summary_masac.json model_test/comparison_data/summary_amasac.json \
+  --labels MASAC AMASAC
 ```
 
 ---

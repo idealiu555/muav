@@ -1,5 +1,5 @@
 """
-python main.py test --num_episodes 50 --model_path model_test/model_pth/amappo --config_path model_test/model_config/amappo/amappo.json
+python main.py test --num_episodes 50 --model_path model_test/amasac --config_path model_test/amasac/amasac.json --gpu_id 4
 """
 
 import json
