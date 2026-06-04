@@ -1,6 +1,6 @@
 # 多无人机空中基站通信保障系统 —— 技术详解文档
 
-> 状态说明（2026-04-18 统一口径版）：本文档采用项目汇报与论文叙事口径进行整理。MAPPO 主方法包含两项关键增强：一是基于 `count -> mask -> cross-attention` 的可变长度观测编码；二是在 centralized critic 中引入 `one-hot` 身份标识以细化价值分解。全文围绕这一统一方法口径展开。
+> 状态说明（2026-06-04 统一口径版）：本文档采用项目汇报、论文叙事与代码实现一致的口径进行整理。MAPPO 主方法包含两项关键增强：一是基于 `count -> mask -> cross-attention` 的可变长度观测编码；二是在 centralized critic 中引入 `one-hot` 身份标识以细化价值分解。MASAC 分支进一步将 attention 机制拆成 actor 局部实体编码与 critic 多智能体关系建模两个独立配置轴，支持 `mlp`、`local_attention` 与 `agent_self_attention` 三种 critic 模式，便于做严格消融。
 
 ## 目录
 
@@ -19,6 +19,7 @@
   - [3.3 支持的MARL算法](#33-支持的marl算法)
 - [4. 仿真流程](#4-仿真流程)
 - [5. MAPPO 与 PPO 的差异](#5-mappo-与-ppo-的差异)
+- [6. MASAC Attention 分支详解](#6-masac-attention-分支详解)
 
 ---
 
@@ -26,11 +27,13 @@
 
 本项目实现了一个基于**多智能体深度强化学习（MARL）**的多无人机空中基站通信保障系统。系统中多个无人机（UAV）作为空中基站，为地面和空中的用户设备（UE）提供通信服务，同时通过宏基站（MBS）进行内容回源。
 
-### 快速入门口径（MAPPO 重点）
+### 快速入门口径（MAPPO 与 MASAC Attention 重点）
 
 如果按汇报或快速介绍的口径概括，这个项目可以理解为：我把低空网络中的通信保障建模成**多智能体的飞行轨迹与 3D 波束赋形联合优化问题**，让多架 UAV 在每个时隙同时输出 5 维连续动作 `[dx, dy, dz, beam_theta, beam_phi]`，在系统速率、服务时延、能耗和公平性之间做权衡，并额外显式约束碰撞、危险接近和越界行为。每个智能体的局部观测由**自身状态、邻居 UAV 状态、关联 UE 状态和两个实体计数字段**组成；由于邻居数和 UE 数量天然可变，而神经网络要求固定张量输入，环境会先按上限对邻居和 UE 做截断与 padding，再把真实实体个数作为 `count` 附加到观测尾部。
 
 针对这一“**可变长度局部观测 + 固定维度网络输入**”的矛盾，项目中的 MAPPO 主方法引入了 `AttentionEncoder`：先将自身 UAV 状态编码为 query，再将邻居和 UE 编码为 token 序列，利用 `count` 动态生成 mask，通过两层残差式 `cross-attention` 只聚合真实实体信息，并把空实体分支显式置零，尽量减轻 padding 槽位带来的信息污染。在此基础上，centralized critic 进一步接入 agent 的 `one-hot` 身份标识：critic 先基于所有 agent 的 attention 编码构建团队上下文 `team_context`，再用 `one-hot` 身份标识指定“当前正在评估哪一架 UAV”，从而在共享团队信息的同时保留个体索引，学习更细粒度的 value decomposition。这样，attention 主要解决的是**观测截断与 padding 污染**问题，`one-hot` 身份标识主要解决的是**多智能体价值估计过粗**的问题，两者共同支撑了面向低空通信协同控制的增强版 MAPPO。
+
+MASAC 分支采用同一个 `AttentionEncoder` 作为局部实体编码基础，但不再用一个全局 `USE_ATTENTION` 开关混合控制所有结构，而是显式拆分为 `MASAC_ATTENTION_ACTOR` 和 `MASAC_CRITIC_MODE`：前者决定 actor 是否把单个 UAV 的局部观测先编码成结构化表示，后者决定 centralized twin critic 如何建模联合观测与联合动作。`local_attention` critic 只在每个 agent 内部聚合邻居/UE 信息，然后把所有 agent 编码和动作拼接给 MLP；`agent_self_attention` critic 则进一步把每架 UAV 构造成一个 token，token 由局部 attention 编码、当前动作和可学习 agent identity embedding 组成，再通过带 active mask 的 agent-level self-attention 学习 UAV 之间的动态依赖，最后输出 per-agent Q 值。这个分解让 MASAC attention 的收益来源更清晰：actor attention 改善“看见什么”，local attention critic 改善“每个 agent 的局部表征”，agent self attention critic 改善“哪些 agent 的状态和动作会影响当前 agent 的 Q 估计”。
 
 ### 核心优化目标
 
@@ -1338,7 +1341,7 @@ $$
     └── 关联UE数量 (原始计数值，范围 [0, MAX_ASSOCIATED_UES]，默认0~50) ... 1 维
 ```
 
-**说明**：计数字段采用原始整数值（未归一化）。在当前方法设计中，这两个字段主要服务于 **MAPPO attention** 路径：用于动态生成 boolean mask，使 `AttentionEncoder` 只关注真实邻居/UE 而忽略 padding。相比直接把固定上限槽位送入普通 MLP，这种“`count + mask + cross-attention`”的处理方式更适合局部观测中实体数量随时间变化的场景。
+**说明**：计数字段采用原始整数值（未归一化）。在 attention 路径中，`AttentionEncoder` 会先对 count 做边界裁剪，再一方面生成 boolean mask，另一方面把归一化后的 `[neighbor_count / MAX_UAV_NEIGHBORS, ue_count / MAX_ASSOCIATED_UES]` 作为 UAV embedding 的一部分，使编码器同时知道“哪些槽位有效”和“当前实体规模是多少”。这一路径被 MAPPO attention actor/critic 与 MASAC attention actor/critic 复用；相比直接把固定上限槽位送入普通 MLP，这种“`count + mask + cross-attention`”处理方式更适合局部观测中实体数量随时间变化的场景。
 
 #### 3.1.2 观测特征详解
 
@@ -1369,7 +1372,7 @@ $$
 | 缓存命中标志  | 1    | {0, 1} | 本 UAV 是否缓存该请求文件                            |
 
 **（4）实体计数（2 维）**
-分别提供有效关联到的观测邻居及关联UE数量（原始计数，未在环境侧归一化）。在 MAPPO 中，这两个字段会被 attention encoder 直接用来构建 mask，从而在固定长度输入张量中准确区分“真实实体”和“padding 槽位”。
+分别提供有效关联到的观测邻居及关联 UE 数量（原始计数，未在环境侧归一化）。在 MAPPO 与 MASAC 的 attention 分支中，这两个字段会被 `AttentionEncoder` 直接用来构建 mask，从而在固定长度输入张量中准确区分“真实实体”和“padding 槽位”。邻居分支还会额外结合邻居特征末尾的 `is_active` 标记，使失效邻居不会作为有效 key/value 参与注意力聚合。
 
 ### 3.2 动作空间
 
@@ -1449,34 +1452,178 @@ $$
 6. **增强版 MAPPO 的收益来源清晰可解释**：在方法分工上，attention encoder 负责提升局部观测表征质量，`one-hot` 身份标识负责提升 critic 的价值分解粒度，因此性能提升不仅来自“看得更准”，也来自“评得更细”。
 7. **工程鲁棒性与训练统计**：MAPPO 训练路径保留 checkpoint metadata 校验与原子回滚机制，避免 attention/non-attention 配置错配导致的部分加载污染。训练主日志与调试日志拆分为两个 JSONL 文件：环境表现指标写入 `log_data_<timestamp>.json`，训练诊断指标按较低频率写入 `debug_data_<timestamp>.json`。
 
-#### 3.3.3 其他算法模型与通用网络配置
+#### 3.3.3 MASAC（多智能体 Soft Actor-Critic）
+
+MASAC 是当前项目的核心 off-policy 随机策略分支，目标是在连续 3D 移动与波束控制动作空间中引入最大熵探索，缓解 deterministic actor 在复杂通信环境下容易过早收敛的问题。其总体范式仍是 CTDE：
+
+```text
+执行阶段:  obs_i -> actor_i/shared_actor -> action_i
+训练阶段:  (o_1..o_N, a_1..a_N, mask) -> twin centralized critics -> Q_1..Q_N
+```
+
+当前实现绝非简单的“MASAC 外挂一个全局 attention 开关”，而是创新性地将 attention 机制拆分为负责环境特征提取的“局部实体注意”与负责协作图谱构建的“全局主体注意”，分流到两个互相独立的配置轴：
+
+| 配置项 | 默认值 | 作用 |
+|--------|--------|------|
+| `MASAC_ATTENTION_ACTOR` | `False` | 是否让 actor 启用 `AttentionEncoder` 对单个 UAV 的局部杂乱观测做结构化编码 |
+| `MASAC_CRITIC_MODE` | `"mlp"` | critic 结构类型，明确枚举为 `"mlp"`（基线）、`"local_attention"`（仅启用局部感知）、`"agent_self_attention"`（启用全局主体自注意图谱）三态 |
+| `MASAC_AGENT_ID_DIM` | 32 | agent identity embedding 维度 |
+| `MASAC_AGENT_ATTENTION_DIM` | 512 | agent-level self-attention token 维度 |
+| `MASAC_AGENT_ATTENTION_HEADS` | 4 | agent self-attention 头数 |
+| `MASAC_AGENT_ATTENTION_LAYERS` | 2 | agent self-attention 残差块层数 |
+| `MASAC_AGENT_ATTENTION_FFN_MULT` | 4 | self-attention block 中 FFN 宽度倍率 |
+
+这种拆分的意义是消融更清晰：actor attention 只改变分布式执行时每架 UAV 如何理解自己的局部观测；critic mode 只改变训练时 Q 网络如何理解联合状态和联合动作。二者可以同时开启，也可以分别开启。
+
+**（1）MASAC Actor**
+
+MASAC actor 输出高斯策略的 `mean` 与 `log_std`，通过重参数化采样并经过 `tanh` squash 得到 $[-1, 1]$ 内的动作，同时在 log-prob 中加入 tanh Jacobian 校正：
+
+$$
+a_i = \tanh(\mu_\theta(o_i) + \sigma_\theta(o_i) \odot \epsilon), \quad \epsilon \sim \mathcal{N}(0, I)
+$$
+
+$$
+\log \pi(a_i|o_i) =
+\log \mathcal{N}(x_i;\mu_\theta,\sigma_\theta)
+- \sum_k \log(1-\tanh^2(x_{i,k})+\epsilon)
+$$
+
+当 `MASAC_ATTENTION_ACTOR=False` 时，actor 直接使用原始 `obs_i`；当其为 `True` 时，路径变为：
+
+```text
+obs_i
+  -> AttentionEncoder
+  -> encoded_obs_i
+  -> MLP policy head
+  -> mean, log_std
+  -> tanh-squashed stochastic action
+```
+
+注意：actor 始终只接收单个 UAV 的局部观测，不接收 joint observation、joint action 或 agent-level self-attention 上下文，因此执行阶段仍满足 decentralized execution。
+
+**（2）MASAC Critic 的三种模式**
+
+`MASAC_CRITIC_MODE="mlp"` 是标准 flattened centralized critic：
+
+```text
+joint_obs_flat = concat(o_1, ..., o_N)
+joint_action_flat = concat(a_1, ..., a_N)
+concat(joint_obs_flat, joint_action_flat)
+  -> MLP
+  -> [Q_1, ..., Q_N]
+```
+
+`MASAC_CRITIC_MODE="local_attention"` 使用共享 `AttentionEncoder` 对每个 agent 的局部观测单独编码，但不做 agent-level self-attention：
+
+```text
+obs: [batch, N, obs_dim]
+  -> reshape([batch*N, obs_dim])
+  -> shared AttentionEncoder
+  -> encoded_obs: [batch, N, enc_dim]
+concat(encoded_obs_flat, joint_action_flat)
+  -> MLP
+  -> [Q_1, ..., Q_N]
+```
+
+该模式解决的是每个 agent 内部邻居/UE 列表的 padding 污染问题，但 UAV 之间的关系仍交给后续 MLP 从 flatten 向量中隐式学习，适合作为“只有局部实体 attention、没有 agent self-attention”的消融基线。
+
+`MASAC_CRITIC_MODE="agent_self_attention"` 在 local attention 的基础上显式建模 UAV 间依赖。它先为每架 UAV 构造一个 token：
+
+$$
+h_i = \text{AttentionEncoder}(o_i)
+$$
+
+$$
+t_i = \text{Proj}([h_i, a_i, e_i])
+$$
+
+其中 $e_i$ 是可学习的 agent identity embedding，而不是原始整数 ID。随后在 agent 维度上做 masked self-attention：
+
+```text
+[t_1, ..., t_N]
+  -> AgentSelfAttentionBlock x L
+  -> context_i
+concat(context_i, a_i)
+  -> shared Q head
+  -> Q_i(o_1..o_N, a_1..a_N)
+```
+
+这里的 self-attention 不是用来替代动作输入，而是让 critic 在计算 $Q_i$ 时显式感知“哪些 UAV 的状态和动作会影响当前 UAV”。例如邻近 UAV 的波束方向可能影响同频干扰，附近 UAV 的缓存状态可能影响协作链路，边界或碰撞风险也可能通过局部邻接关系传导。相比 flatten MLP，agent self-attention 更符合多 UAV 系统“关系稀疏、重要性随时隙变化”的结构。
+
+**（3）Twin Q、最大熵目标与 per-agent 更新**
+
+MASAC 保留 SAC 的双 Q 设计，训练时使用两个独立 critic 及其 target critic：
+
+$$
+y_i = r_i + \gamma \cdot m_i^{\text{bootstrap}}
+\left[
+\min_{j \in \{1,2\}} Q_{\bar{\phi}_j,i}(o'_{1:N}, a'_{1:N})
+- \alpha \log \pi(a'_i|o'_i)
+\right]
+$$
+
+critic 使用 `smooth_l1_loss` 计算 per-agent TD loss，并通过 `active_mask` 只对活跃 UAV 计入损失。actor 更新时，为避免一个 agent 的 actor loss 错误地把其他 agent 当前采样动作的梯度也带入，该实现会逐个 agent 构造动作张量：除当前 agent 的动作保留梯度外，其他 agent 动作使用 `detach().clone()` 固定。于是第 $i$ 个 agent 的目标为：
+
+$$
+J_{\pi_i} =
+\mathbb{E}\left[
+\alpha \log \pi(a_i|o_i)
+- \min(Q_{1,i}, Q_{2,i})
+\right]
+$$
+
+温度参数 $\alpha$ 通过 `log_alpha` 学习，并受 `ALPHA_MIN=4e-3` 下界约束，目标熵为：
+
+$$
+\mathcal{H}_{target} = -\text{ACTION\_DIM} \times \text{TARGET\_ENTROPY\_SCALE}
+$$
+
+当前 `TARGET_ENTROPY_SCALE=0.8`。这样既保留 SAC 的探索压力，又避免复杂多智能体场景中熵温度过快塌缩。
+
+**（4）MASAC attention 的工程鲁棒性**
+
+MASAC attention 分支在实现上有几项关键防护：
+
+1. `AttentionEncoder` 会 clamp count，空 UE/邻居分支经 `zero_empty_summary` 显式置零，避免全 mask softmax 产生 NaN 或残差 query 泄露。
+2. `agent_self_attention` critic 将 `agent_mask` 转换为 PyTorch `key_padding_mask`，其中 `agent_mask=1` 表示活跃，`key_padding_mask=True` 表示屏蔽。
+3. 对全体 agent 都 inactive 的 batch row，会临时取消 key mask 以避免 `MultiheadAttention` 全 masked 行 NaN，随后再把对应 context 和 Q 值置零。
+4. checkpoint 记录 `critic_mode`、`use_attention_actor` 和完整 architecture metadata。加载时如果 actor attention、critic mode、agent 数量或 attention 维度不匹配，会直接拒绝加载，避免不同结构权重被误用。
+5. debug diagnostics 在 agent self-attention 模式下额外记录 `agent_attention_entropy` 与 `agent_attention_max_weight`，用于观察 critic 是否集中关注少数关键 UAV，或是否出现注意力退化。
+
+#### 3.3.4 其他算法模型与通用网络配置
 | 算法             | 类型       | Actor  | Critic    | 核心特点                 |
 | ---------------- | ---------- | ------ | --------- | -------------------- |
 | **MATD3**  | Off-policy | 分布式 | 双 Critic | 引入双网络与策略延迟更新减少 Q 值过估计 |
-| **MASAC**  | Off-policy | 分布式 | 双 Critic | 基于最大熵探索优化，提升鲁棒性 |
+| **MASAC**  | Off-policy | 分布式 | 双 Critic | 基于最大熵探索优化，并支持局部 attention 与 agent self-attention critic |
 | **Random** | -          | 随机   | -         | 用于通信与系统仿真的基线性能对比 |
 
 ##### 网络与超参数基线配置
-- **MLP 隐藏层维度**：768 (Shared block configuration)
+- **MLP 隐藏层维度**：当前实现区分普通分支与 attention 分支。普通 actor 宽度为 `BASE_ACTOR_HIDDEN_DIM=192`，普通 critic 宽度为 `BASE_CRITIC_HIDDEN_DIM=384`；attention actor head 宽度为 `ATTENTION_ACTOR_HIDDEN_DIM=256`，attention critic / Q head 宽度为 `ATTENTION_CRITIC_HIDDEN_DIM=512`。
 - **Actor 网络结构**：
-    - MADDPG/MATD3: `obs_dim → 768 → 768 → action_dim` (确定性策略，直接 tanh 输出)
-    - MASAC: `obs_dim → 768 → 768 → (mean, log_std)`（随机策略，重参数采样后 tanh）
-  - MAPPO: `obs_dim → 768 → 768 → action_dim (均值) + log_std` (正态分布与 tanh-squash 机制)
-    - *注*：MADDPG 与 MAPPO 的无 attention 分支当前都直接使用原始 `obs/share_obs`；只有 MAPPO 的 attention 分支会先经过 `AttentionEncoder`。
+    - MADDPG/MATD3: `obs_dim -> 192 -> 192 -> action_dim`（确定性策略，直接 `tanh` 输出）
+    - MASAC non-attention actor: `obs_dim -> 192 -> 192 -> (mean, log_std)`（随机策略，重参数采样后 `tanh`）
+    - MASAC attention actor: `obs_i -> AttentionEncoder(512) -> 256 -> 256 -> (mean, log_std)`
+    - MAPPO non-attention actor: `obs_dim -> 192 -> 192 -> action_dim(mean) + log_std`
+    - MAPPO attention actor: `obs_i -> AttentionEncoder(512) -> 256 -> 256 -> action_dim(mean) + log_std`
+    - *注*：MADDPG 与 MATD3 当前没有 attention 分支；MAPPO 由 `USE_ATTENTION` 控制；MASAC 由 `MASAC_ATTENTION_ACTOR` 与 `MASAC_CRITIC_MODE` 单独控制。
 - **Critic 网络结构**：
-    - MATD3/MASAC: `(num_agents*obs_dim + num_agents*action_dim) → 768 → 768 → 1`（双 Critic 版本，无残差）
+    - MADDPG: `concat(joint_obs, joint_action) -> 384 -> 384 -> Q_i`
+    - MATD3: `concat(joint_obs, joint_action) -> 384 -> 384 -> Q_i`（双 Critic 版本）
+    - MASAC `mlp`: `concat(joint_obs_flat, joint_action_flat) -> 384 -> 384 -> [Q_1..Q_N]`（twin critics）
+    - MASAC `local_attention`: `obs_i -> AttentionEncoder(512)` 后 flatten 全体编码与动作，再经 `512 -> 512 -> [Q_1..Q_N]`
+    - MASAC `agent_self_attention`: `obs_i -> AttentionEncoder(512)`，再构造 `[h_i, a_i, e_i]` token，经 agent self-attention 与共享 Q head 输出 `[Q_1..Q_N]`
     - MAPPO:
       - non-attention: `share_obs(flattened joint obs) → scalar value head → 1`
       - attention: `share_obs(flattened joint obs) → reshape([batch, N, obs_dim]) → AttentionEncoder(each obs_i) → build(team_context) → concat(team_context, one_hot_i) → shared scalar value head → [N]`
-    - MADDPG: `joint_obs + joint_action → 768 → 768 → 1`
-- **优化器与学习率**：Actor $LR = 1 \times 10^{-4}$，Critic $LR = 2 \times 10^{-4}$，AdamW
+- **优化器与学习率**：Actor 基础学习率为 $1 \times 10^{-4}$（MADDPG/MAPPO 有算法特定 actor LR 配置），Critic 学习率为 $2 \times 10^{-4}$。当前 MASAC 使用 `Adam`，MADDPG/MATD3/MAPPO 按各自实现使用对应优化器与梯度裁剪。
 
 | 通用超参数         | 值 | 说明 |
 |------------------|----|------|
 | 分配折现 $\gamma$ | 0.99 | 价值未来折扣率 |
 | 软更新网络 $\tau$ | 0.001 | 目标网络的平滑更新率 |
 | 经验回放与批量 | Buffer: $6\times10^5$, Batch: 1024 | |
-| MAPPO Epoch | 10 | PPO阶段迭代轮数 |
+| MAPPO Epoch | 6 | PPO 阶段迭代轮数 |
 
 ---
 
@@ -1683,6 +1830,175 @@ python plot_comparison.py \
 
 ---
 
+## 6. MASAC Attention 分支详解
+
+MASAC attention 分支可以理解为 AMASAC 的工程实现基础。它没有把 attention 当成一个笼统模块，而是按多智能体 SAC 的信息流拆成两个层级：局部实体层和 agent 关系层。局部实体层处理单架 UAV 看到的邻居 UAV 与关联 UE；agent 关系层处理 centralized critic 中不同 UAV 之间的相互影响。
+
+### 6.1 设计动机
+
+标准 MASAC critic 通常把所有 agent 的观测和动作直接 flatten：
+
+```text
+[o_1, ..., o_N, a_1, ..., a_N] -> MLP -> [Q_1, ..., Q_N]
+```
+
+这种做法虽然简单，但在本项目中有两个结构性问题：
+
+1. 单个 $o_i$ 内部包含可变数量的邻居和 UE。padding 槽位会污染 MLP 输入，截断又可能丢掉关键服务对象。
+2. 不同 UAV 之间的影响不是固定全连接关系。某些 UAV 由于距离近、波束干扰强、缓存互补高或碰撞风险高，对当前 $Q_i$ 更重要；其他远离或失效的 UAV 则应该被弱化甚至屏蔽。
+
+因此 MASAC attention 分支采用两级处理：
+
+```text
+局部实体 attention:  obs_i -> h_i
+agent self-attention: [h_i, a_i, agent_id_i]_{i=1..N} -> context_i -> Q_i
+```
+
+### 6.2 局部实体 AttentionEncoder
+
+`AttentionEncoder` 的输入仍是环境提供的 flat observation，但内部会解析为三类结构化特征：
+
+| 分支 | 输入内容 | 编码方式 | 输出作用 |
+|------|----------|----------|----------|
+| UAV 自身 | 位置、缓存、活跃标记、归一化 count | `UAVEmbedding` | 作为自身状态编码，并生成 UE/邻居分支 query |
+| UE 实体 | 相对位置、请求文件 ID、缓存命中 | `UEEmbedding + CrossAttention` | 聚合当前服务需求与缓存命中信息 |
+| 邻居 UAV 实体 | 相对位置、缓存位图、帮助能力、互补性、活跃标记 | `NeighborEmbedding + CrossAttention` | 聚合协作与干扰相关邻居信息 |
+
+当前默认输出维度为：
+
+$$
+\text{encoder.output\_dim}
+= 128_{\text{UAV}} + 256_{\text{UE}} + 128_{\text{Neighbor}}
+= 512
+$$
+
+UE mask 由 `ue_count` 生成；邻居 mask 同时使用 `neighbor_count` 和邻居槽位的 `is_active`，因此 padding 邻居与失效邻居都不会作为有效 token 参与注意力。对于空实体集合，编码器会将对应 summary 显式置零。这一点很重要：如果只依赖 softmax 的全 mask 行，容易产生 NaN；如果不清零空分支，残差 query 可能把“没有实体”误编码成某种非零实体摘要。
+
+### 6.3 Local Attention Critic
+
+`local_attention` critic 是 MASAC attention 的第一层增强，也是必要的消融基线。它的 critic 仍然输出 per-agent Q 向量，但每个 agent 的观测先经过共享 `AttentionEncoder`：
+
+```text
+obs: [B, N, obs_dim]
+  -> reshape([B*N, obs_dim])
+  -> AttentionEncoder
+  -> h: [B, N, 512]
+
+# 关键掩码机制：在 flatten 之前，把失效 agent 的编码与动作严格置零
+h_masked = h * agent_mask
+actions_masked = actions * agent_mask
+
+concat(flatten(h_masked), flatten(actions_masked))
+  -> MLP critic
+  -> [Q_1, ..., Q_N]
+```
+
+这个模式能回答一个关键消融问题：性能变化是否仅来自“更好的局部观测编码”。同时，该分支实现了**严格的失效智能体掩码机制**：在拼接成 Joint 张量并送入 MLP 前，失效 agent 的表示 $h_i$ 和动作 $a_i$ 均被显式置零（乘以 `agent_mask`），从而彻底切断失效槽对全体共享特征的噪声注入效应。它没有显式建模 agent 间注意力，所有活跃 UAV 间关系仍由 flatten 后的 MLP 学习。因此，如果 `local_attention` 有提升，说明 padding/可变实体编码与特征掩码处理确实有帮助；如果 `agent_self_attention` 在此基础上继续提升，才说明显式 agent 关系建模带来了额外价值。
+
+### 6.4 Agent Self-Attention Critic
+
+`agent_self_attention` critic 进一步把每架 UAV 抽象为一个 agent token，专注于对多架 UAV 间变动的依赖关系进行建模。每个 token 包含三类信息：
+
+| token 组成 | 记号 | 作用 |
+|------------|------|------|
+| 局部观测编码 | $h_i$ | 由 `AttentionEncoder` 从环境抽取，表示当前 UAV 看到的有效实体的语义特征 |
+| 当前动作 | $a_i$ | 当前 UAV 执行的局部决策，保证 critic 估计的是基于联合动作的 action-value |
+| 身份嵌入 | $e_i$ | 使用极简且高效的可学习 `agent_id_embedding` 提供 agent 固有属性与差异化条件 |
+
+数学上，将三者拼接并投影映射为目标 token：
+
+$$
+t_i = W_t [h_i, a_i, e_i]
+$$
+
+所有 token 组成序列后送入多层 pre-LayerNorm residual self-attention。第 $\ell$ 层可写为：
+
+$$
+\tilde{T}^{(\ell)} =
+T^{(\ell)} + \text{MHA}(\text{LN}(T^{(\ell)}), \text{mask}=\text{key\_padding\_mask})
+$$
+
+$$
+T^{(\ell+1)} =
+\tilde{T}^{(\ell)} + \text{FFN}(\text{LN}(\tilde{T}^{(\ell)}))
+$$
+
+实际实现中每层包含：
+
+```text
+x = x + MultiheadAttention(LayerNorm(x))
+x = x + FFN(LayerNorm(x))
+```
+
+其中 FFN 使用 `SiLU` 激活，与 MASAC 其他 MLP 保持一致。在注意力层级计算时，实现了极度完备的**健壮掩码机制**：
+1. self-attention 的 key/value 侧使用由 `agent_mask` 推导出的 `key_padding_mask` 动态屏蔽失效 agent，使失效槽位不再吸纳其他活跃 UAV 的 attention 概率分配。
+2. 内部搭载了**防 NaN 设计** (`safe_key_padding_mask`)。在遇到整个 mini-batch 中的某一集全员均失效的情况时（对应的 mask 呈现为全 True），强行触发 softmax 极易产出全 NaN 导致框架崩塌。代码中通过 `safe_key_padding_mask[all_inactive] = False` 维持了底层运算图的平稳流动。
+3. query 侧则会在最终提炼 context 表征和 Q 值张量时被实施后置置零操作，确保持有 inactive 标记的 agent 其预测绝对规整，不散发任何虚空梯度信号。
+
+### 6.5 为什么 Q Head 仍直接拼接动作
+
+在 `agent_self_attention` critic 中，动作 $a_i$ 虽已参与构成 token，但最终输入给 Q head 时仍会选择**直接再次拼接当前 agent 的原始动作**：
+
+```text
+q_input_i = concat(context_i, a_i)
+q_i = QHead(q_input_i)
+```
+
+这样做绝不是赘余的设计，而是深刻针对 **SAC actor 更新机制作出的保真干预**。SAC 的策略训练极细致地依赖对应动作对应的行为价值评估导数，即通过计算偏导数 $\frac{\partial Q_i}{\partial a_i}$ 迭代策略网络。针对多智能体体系：
+如果动作纯粹在低层特征时汇入，并接连承受多级 `token projection`、`Self-Attention 跨映射` 以及频繁变换的 `LayerNorm` 的削弱，梯度的回传轨迹不仅深远且会在相互注意混排当中发生严重的特征泄露与弥散。这会导致最终指导行动的更新量变得高度浑浊与不可控。
+将没被任何多余干扰过的 $a_i$ 短接绕过复杂结构在最终端拼回输入，可以辟出一条纯净的行动导向快捷连接，使得 Q 头网络提供明确锐利的对应单体的局部动作指导梯度，而 `context_i` 负责继续从旁侧充入深邃的结构化全局协同意识，二者完美互补。
+
+### 6.6 与 MAPPO Attention 的区别
+
+MASAC attention 与 MAPPO attention 共用 `AttentionEncoder`，但 critic 语义不同：
+
+| 维度 | MAPPO Attention | MASAC Attention |
+|------|-----------------|-----------------|
+| 算法类型 | On-policy PPO 框架 | Off-policy SAC 框架 |
+| critic 输出 | per-agent value $V_i$ | per-agent action-value $Q_i$ |
+| critic 输入 | joint observation / share_obs | joint observation + joint action |
+| agent 身份 | `one-hot` 拼接到 value head | learned `agent_id_embedding` 进入 token |
+| agent 关系建模 | team context + identity 条件化 | 可选 agent-level self-attention |
+| 训练目标 | clipped policy objective + GAE | twin Q target + entropy-regularized actor objective |
+
+这一区别必须保持清楚：MASAC critic 不能只看状态，因为 SAC 的 actor 更新需要对当前动作求 Q 梯度；MAPPO critic 则估计 value，用于 advantage 计算。
+
+### 6.7 当前对比结果解读
+
+`model_test/comparison_data/summary_masac.json` 与 `summary_amasac.json` 记录了一组 50 episode 测试对比。当前 summary 中：
+
+| 指标 | MASAC | AMASAC | 变化 |
+|------|-------|--------|------|
+| Reward | 0.9172 | 1.2896 | 提升约 40.6% |
+| Latency | 1121.77 | 732.73 | 降低约 34.7% |
+| Energy | 501.92 | 498.39 | 基本持平，略降约 0.7% |
+| Fairness | 0.9183 | 0.9400 | 提升约 2.4% |
+| Rate | 668.77 Mbps | 611.37 Mbps | 降低约 8.6% |
+| Collisions | 0.0 | 0.0 | 持平 |
+| Boundaries | 54.6 | 0.56 | 大幅降低 |
+
+这组结果说明 AMASAC 的主要收益不是单纯拉高峰值吞吐，而是显著改善时延、安全边界行为和整体 reward。在该奖励设计下，attention critic 更可能学到“避免无效移动、降低排队时延、减少边界违规”的协同策略；速率下降则提示该策略可能更偏保守，牺牲部分瞬时吞吐换取更稳定的服务质量。正式论文或报告中应继续使用多随机种子与消融实验验证该趋势，避免只凭单次 summary 下结论。
+
+### 6.8 推荐消融口径
+
+为了证明 MASAC attention 分支的贡献来源，建议至少比较以下配置：
+
+| 实验名 | `MASAC_ATTENTION_ACTOR` | `MASAC_CRITIC_MODE` | 目的 |
+|--------|--------------------------|---------------------|------|
+| MASAC | `False` | `"mlp"` | 标准 baseline |
+| Actor-Attn MASAC | `True` | `"mlp"` | 只验证 actor 局部观测编码 |
+| Local-Attn Critic MASAC | `False` 或 `True` | `"local_attention"` | 验证 critic 局部实体编码 |
+| Agent-Self-Attn MASAC / AMASAC | `False` 或 `True` | `"agent_self_attention"` | 验证显式 agent 关系建模 |
+
+在评估对比实验结果时，绝不能仅凭借 reward 单一表象判断优劣，应综合涵盖 `latency / energy / fairness / rate / collisions / boundaries` 进行系统层面的验证查验。
+此外，框架通过挂载 `attention_diagnostics()` 内置了深度的指标监听结构，能够在调试日志中周期性追踪特定分布特性：
+- **`agent_attention_entropy`**：衡量层内注意力的分布广度（注意力混乱度）。
+- **`agent_attention_max_weight`**：刻画注意力的最大焦点攀附强度。
+  
+持续监视这几维度日志极大拓展了网络决策的可解释性。例如它能直接协助研判——当前 critic 到底是**演化出了强关联的精准阵型配合（体现为高峻的 max_weight 伴随较低的 entropy，指明网络能自适应捕捉并集火重点通信相邻体）**，还是不幸**退出了协同只呈现盲目的信息广播均摊（表现为分布趋近高熵均匀带，揭示 self-attention 未能成功构筑信息壁垒）**。
+
+---
+
 ## 附录：快速启动
 
 ### 训练
@@ -1719,4 +2035,4 @@ python plot_comparison.py \
 
 ---
 
-*文档更新：2026年4月18日（已按统一项目口径整理）*
+*文档更新：2026年6月4日（已按 MAPPO 与 MASAC attention 当前实现统一整理）*
