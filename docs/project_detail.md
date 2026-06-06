@@ -1,6 +1,6 @@
 # 多无人机空中基站通信保障系统 —— 技术详解文档
 
-> 状态说明（2026-06-04 统一口径版）：本文档采用项目汇报、论文叙事与代码实现一致的口径进行整理。MAPPO 主方法包含两项关键增强：一是基于 `count -> mask -> cross-attention` 的可变长度观测编码；二是在 centralized critic 中引入 `one-hot` 身份标识以细化价值分解。MASAC 分支进一步将 attention 机制拆成 actor 局部实体编码与 critic 多智能体关系建模两个独立配置轴，支持 `mlp`、`local_attention` 与 `agent_self_attention` 三种 critic 模式，便于做严格消融。
+> 状态说明（2026-06-06 统一口径版）：本文档采用项目汇报、论文叙事与代码实现一致的口径进行整理。MAPPO 当前是无 attention 的 on-policy 基线，只保留 MLP actor 与 centralized MLP critic。MASAC 分支将 attention 机制拆成 actor 局部实体编码与 critic 多智能体关系建模两个独立配置轴，支持 `mlp`、`local_attention` 与 `agent_self_attention` 三种 critic 模式，便于做严格消融。
 
 ## 目录
 
@@ -31,9 +31,9 @@
 
 如果按汇报或快速介绍的口径概括，这个项目可以理解为：我把低空网络中的通信保障建模成**多智能体的飞行轨迹与 3D 波束赋形联合优化问题**，让多架 UAV 在每个时隙同时输出 5 维连续动作 `[dx, dy, dz, beam_theta, beam_phi]`，在系统速率、服务时延、能耗和公平性之间做权衡，并额外显式约束碰撞、危险接近和越界行为。每个智能体的局部观测由**自身状态、邻居 UAV 状态、关联 UE 状态和两个实体计数字段**组成；由于邻居数和 UE 数量天然可变，而神经网络要求固定张量输入，环境会先按上限对邻居和 UE 做截断与 padding，再把真实实体个数作为 `count` 附加到观测尾部。
 
-针对这一“**可变长度局部观测 + 固定维度网络输入**”的矛盾，项目中的 MAPPO 主方法引入了 `AttentionEncoder`：先将自身 UAV 状态编码为 query，再将邻居和 UE 编码为 token 序列，利用 `count` 动态生成 mask，通过两层残差式 `cross-attention` 只聚合真实实体信息，并把空实体分支显式置零，尽量减轻 padding 槽位带来的信息污染。在此基础上，centralized critic 进一步接入 agent 的 `one-hot` 身份标识：critic 先基于所有 agent 的 attention 编码构建团队上下文 `team_context`，再用 `one-hot` 身份标识指定“当前正在评估哪一架 UAV”，从而在共享团队信息的同时保留个体索引，学习更细粒度的 value decomposition。这样，attention 主要解决的是**观测截断与 padding 污染**问题，`one-hot` 身份标识主要解决的是**多智能体价值估计过粗**的问题，两者共同支撑了面向低空通信协同控制的增强版 MAPPO。
+当前 MAPPO 分支作为无 attention 的 on-policy 基线：actor 直接接收单个 UAV 的固定长度局部观测，critic 直接接收展平后的全体观测 `share_obs`，并输出 per-agent value。也就是说，MAPPO 保留了集中训练、分散执行、PPO clipped update、GAE、ValueNorm 和 active mask 等训练机制，但不再构造 `AttentionEncoder`、cross-attention、agent identity embedding 或 attention/non-attention 双分支。
 
-MASAC 分支采用同一个 `AttentionEncoder` 作为局部实体编码基础，但不再用一个全局 `USE_ATTENTION` 开关混合控制所有结构，而是显式拆分为 `MASAC_ATTENTION_ACTOR` 和 `MASAC_CRITIC_MODE`：前者决定 actor 是否把单个 UAV 的局部观测先编码成结构化表示，后者决定 centralized twin critic 如何建模联合观测与联合动作。`local_attention` critic 只在每个 agent 内部聚合邻居/UE 信息，然后把所有 agent 编码和动作拼接给 MLP；`agent_self_attention` critic 则进一步把每架 UAV 构造成一个 token，token 由局部 attention 编码、当前动作和可学习 agent identity embedding 组成，再通过带 active mask 的 agent-level self-attention 学习 UAV 之间的动态依赖，最后输出 per-agent Q 值。这个分解让 MASAC attention 的收益来源更清晰：actor attention 改善“看见什么”，local attention critic 改善“每个 agent 的局部表征”，agent self attention critic 改善“哪些 agent 的状态和动作会影响当前 agent 的 Q 估计”。
+MASAC 分支采用同一个 `AttentionEncoder` 作为局部实体编码基础，并显式拆分为 `MASAC_ATTENTION_ACTOR` 和 `MASAC_CRITIC_MODE`：前者决定 actor 是否把单个 UAV 的局部观测先编码成结构化表示，后者决定 centralized twin critic 如何建模联合观测与联合动作。`local_attention` critic 只在每个 agent 内部聚合邻居/UE 信息，然后把所有 agent 编码和动作拼接给 MLP；`agent_self_attention` critic 则进一步把每架 UAV 构造成一个 token，token 由局部 attention 编码、当前动作和可学习 agent identity embedding 组成，再通过带 active mask 的 agent-level self-attention 学习 UAV 之间的动态依赖，最后输出 per-agent Q 值。这个分解让 MASAC attention 的收益来源更清晰：actor attention 改善“看见什么”，local attention critic 改善“每个 agent 的局部表征”，agent self attention critic 改善“哪些 agent 的状态和动作会影响当前 agent 的 Q 估计”。
 
 ### 核心优化目标
 
@@ -1341,7 +1341,7 @@ $$
     └── 关联UE数量 (原始计数值，范围 [0, MAX_ASSOCIATED_UES]，默认0~50) ... 1 维
 ```
 
-**说明**：计数字段采用原始整数值（未归一化）。在 attention 路径中，`AttentionEncoder` 会先对 count 做边界裁剪，再一方面生成 boolean mask，另一方面把归一化后的 `[neighbor_count / MAX_UAV_NEIGHBORS, ue_count / MAX_ASSOCIATED_UES]` 作为 UAV embedding 的一部分，使编码器同时知道“哪些槽位有效”和“当前实体规模是多少”。这一路径被 MAPPO attention actor/critic 与 MASAC attention actor/critic 复用；相比直接把固定上限槽位送入普通 MLP，这种“`count + mask + cross-attention`”处理方式更适合局部观测中实体数量随时间变化的场景。
+**说明**：计数字段采用原始整数值（未归一化）。在 MASAC attention 路径中，`AttentionEncoder` 会先对 count 做边界裁剪，再一方面生成 boolean mask，另一方面把归一化后的 `[neighbor_count / MAX_UAV_NEIGHBORS, ue_count / MAX_ASSOCIATED_UES]` 作为 UAV embedding 的一部分，使编码器同时知道“哪些槽位有效”和“当前实体规模是多少”。MAPPO 当前不使用 attention encoder，而是把固定长度观测直接输入 MLP。
 
 #### 3.1.2 观测特征详解
 
@@ -1372,7 +1372,7 @@ $$
 | 缓存命中标志  | 1    | {0, 1} | 本 UAV 是否缓存该请求文件                            |
 
 **（4）实体计数（2 维）**
-分别提供有效关联到的观测邻居及关联 UE 数量（原始计数，未在环境侧归一化）。在 MAPPO 与 MASAC 的 attention 分支中，这两个字段会被 `AttentionEncoder` 直接用来构建 mask，从而在固定长度输入张量中准确区分“真实实体”和“padding 槽位”。邻居分支还会额外结合邻居特征末尾的 `is_active` 标记，使失效邻居不会作为有效 key/value 参与注意力聚合。
+分别提供有效关联到的观测邻居及关联 UE 数量（原始计数，未在环境侧归一化）。在 MASAC attention 分支中，这两个字段会被 `AttentionEncoder` 直接用来构建 mask，从而在固定长度输入张量中准确区分“真实实体”和“padding 槽位”。MAPPO 当前不读取这些字段生成 attention mask。
 
 ### 3.2 动作空间
 
@@ -1446,11 +1446,9 @@ $$
 作为本项目的核心 On-policy 算法基线，针对复杂的 UAV 微调场景解决了多个关键痛点：
 1. **有界动作空间与 Jacobian 校正**：摒弃了易出现越界截断的传统 Normal 采样裁剪方案，环境直接映射 $[-1, 1]$ 有界动作，而在算法层采用 `tanh-squash` 机制并附加 Jacobian 行列式校正。保证了动作采样不越界且 Log Probability 计算的绝对准确。
 2. **Rollout 级别的 Advantage 归一化**：不同于在每个 mini-batch 内重复归一化（易引入高方差），系统利用 Rollout Buffer 的全量视角进行全局 Advantage 归一化，且仅针对 Active 的智能体生效，极大提升了训练稳定性。
-3. **AttentionEncoder 处理可变长度观测**：在局部观测中，邻居 UAV 和关联 UE 的数量随时间变化，但神经网络输入必须保持固定维度。为此，MAPPO 先保留实体计数，再用 `count` 生成 mask，通过 cross-attention 只聚合真实实体信息，从而缓解观测截断与 padding 带来的信息损失。
-4. **critic 引入 one-hot 身份标识做价值分解**：标准 centralized critic 容易把多个 agent 的价值混成一个较粗的团队估计。这里的做法是先基于所有 agent 的 attention 编码构建 `team_context`，再在 critic 端拼接当前 agent 的 `one-hot` 身份标识，让价值网络在共享团队信息的同时保留“当前评估对象”的索引信息，从而输出更细粒度的 per-agent value。
-5. **双分支实现（Attention / Non-Attention）**：当 `USE_ATTENTION=True` 时，MAPPO 使用 `AttentionActorNetwork + AttentionCriticNetwork`。其中 actor 走 `obs_i -> AttentionEncoder -> Gaussian policy head`；critic 走 `share_obs -> reshape -> AttentionEncoder(each obs_i) -> build team_context -> concat(team_context, one_hot_i) -> shared value head -> values for all agents`。当 `USE_ATTENTION=False` 时，普通 actor 直接使用 `raw obs`，普通 critic 直接使用 `flat share_obs`。两条分支共享统一输入契约：critic 的输入张量形状始终为 `[batch, num_agents * obs_dim]`。
-6. **增强版 MAPPO 的收益来源清晰可解释**：在方法分工上，attention encoder 负责提升局部观测表征质量，`one-hot` 身份标识负责提升 critic 的价值分解粒度，因此性能提升不仅来自“看得更准”，也来自“评得更细”。
-7. **工程鲁棒性与训练统计**：MAPPO 训练路径保留 checkpoint metadata 校验与原子回滚机制，避免 attention/non-attention 配置错配导致的部分加载污染。训练主日志与调试日志拆分为两个 JSONL 文件：环境表现指标写入 `log_data_<timestamp>.json`，训练诊断指标按较低频率写入 `debug_data_<timestamp>.json`。
+3. **单一路径 MLP actor/critic**：MAPPO 不再提供 attention 分支。actor 直接使用 `raw obs`，critic 直接使用 `flat share_obs`，critic 输入张量形状始终为 `[batch, num_agents * obs_dim]`。
+4. **per-agent value 输出**：centralized critic 输出 `[batch, num_agents]` 的 value 向量，训练时根据 `agent_index` 取出当前样本对应的 value，用于 value loss 和 advantage 计算。
+5. **工程鲁棒性与训练统计**：MAPPO 训练路径保留 checkpoint metadata 校验与原子回滚机制。训练主日志与调试日志拆分为两个 JSONL 文件：环境表现指标写入 `log_data_<timestamp>.json`，训练诊断指标按较低频率写入 `debug_data_<timestamp>.json`。
 
 #### 3.3.3 MASAC（多智能体 Soft Actor-Critic）
 
@@ -1605,17 +1603,14 @@ MASAC attention 分支在实现上有几项关键防护：
     - MASAC non-attention actor: `obs_dim -> 192 -> 192 -> (mean, log_std)`（随机策略，重参数采样后 `tanh`）
     - MASAC attention actor: `obs_i -> AttentionEncoder(512) -> 256 -> 256 -> (mean, log_std)`
     - MAPPO non-attention actor: `obs_dim -> 192 -> 192 -> action_dim(mean) + log_std`
-    - MAPPO attention actor: `obs_i -> AttentionEncoder(512) -> 256 -> 256 -> action_dim(mean) + log_std`
-    - *注*：MADDPG 与 MATD3 当前没有 attention 分支；MAPPO 由 `USE_ATTENTION` 控制；MASAC 由 `MASAC_ATTENTION_ACTOR` 与 `MASAC_CRITIC_MODE` 单独控制。
+    - *注*：MADDPG、MATD3 与 MAPPO 当前没有 attention 分支；MASAC 由 `MASAC_ATTENTION_ACTOR` 与 `MASAC_CRITIC_MODE` 单独控制。
 - **Critic 网络结构**：
     - MADDPG: `concat(joint_obs, joint_action) -> 384 -> 384 -> Q_i`
     - MATD3: `concat(joint_obs, joint_action) -> 384 -> 384 -> Q_i`（双 Critic 版本）
     - MASAC `mlp`: `concat(joint_obs_flat, joint_action_flat) -> 384 -> 384 -> [Q_1..Q_N]`（twin critics）
     - MASAC `local_attention`: `obs_i -> AttentionEncoder(512)` 后 flatten 全体编码与动作，再经 `512 -> 512 -> [Q_1..Q_N]`
     - MASAC `agent_self_attention`: `obs_i -> AttentionEncoder(512)`，再构造 `[h_i, a_i, e_i]` token，经 agent self-attention 与共享 Q head 输出 `[Q_1..Q_N]`
-    - MAPPO:
-      - non-attention: `share_obs(flattened joint obs) → scalar value head → 1`
-      - attention: `share_obs(flattened joint obs) → reshape([batch, N, obs_dim]) → AttentionEncoder(each obs_i) → build(team_context) → concat(team_context, one_hot_i) → shared scalar value head → [N]`
+    - MAPPO: `share_obs(flattened joint obs) -> centralized MLP value head -> [V_1..V_N]`
 - **优化器与学习率**：Actor 基础学习率为 $1 \times 10^{-4}$（MADDPG/MAPPO 有算法特定 actor LR 配置），Critic 学习率为 $2 \times 10^{-4}$。当前 MASAC 使用 `Adam`，MADDPG/MATD3/MAPPO 按各自实现使用对应优化器与梯度裁剪。
 
 | 通用超参数         | 值 | 说明 |
@@ -1733,7 +1728,7 @@ python plot_comparison.py \
 
 ## 5. MAPPO 与 PPO 的差异
 
-这一节专门回答一个常见问题：**当前项目中的增强版 MAPPO，相比标准 PPO 到底多了什么？**  
+这一节专门回答一个常见问题：**当前项目中的 MAPPO，相比标准 PPO 到底多了什么？**
 
 一个直观但不够准确的说法是，“MAPPO 就是把 PPO 复制到多个 agent 上”。真正更准确的理解是：**MAPPO 保留了 PPO 的优化骨架，但把问题建模、观测编码、价值估计和训练组织都改造成了适合多智能体协同决策的形式。**  
 
@@ -1763,70 +1758,47 @@ python plot_comparison.py \
 
 ### 5.3 当前项目口径下，MAPPO 相比 PPO 的四个关键增强
 
-| 维度 | 标准 PPO | 本项目中的增强版 MAPPO |
+| 维度 | 标准 PPO | 本项目中的 MAPPO |
 |------|----------|------------------------|
 | **决策对象** | 单智能体 | 多智能体并行决策，多个 UAV 同时输出动作 |
 | **训练范式** | 通常是 decentralized actor-critic | CTDE：执行时用局部观测，训练时 critic 利用共享团队上下文 |
-| **观测编码** | 默认固定长度输入，通常直接送入 MLP | 使用 `count -> mask -> cross-attention` 处理邻居/UE 的可变长度观测 |
-| **价值估计** | `V(o)` 或 `V(s)`，通常不区分 agent 身份 | critic 引入 `one-hot` 身份标识，输出 `agent-specific value`，支持更细粒度的 per-agent advantage 估计 |
+| **观测编码** | 默认固定长度输入，通常直接送入 MLP | 当前 MAPPO 同样使用固定长度观测直接进入 MLP |
+| **价值估计** | `V(o)` 或 `V(s)`，通常为单智能体 value | centralized critic 使用 `share_obs` 输出 per-agent value 向量 |
 
 如果把这四点压缩成一句话，可以写成：
 
-> PPO 解决的是“一个智能体如何更新策略”；而本项目中的 MAPPO 解决的是“多个智能体在局部可见、信息长度可变、价值粒度需要区分个体身份的条件下，如何稳定地协同更新策略”。
+> PPO 解决的是“一个智能体如何更新策略”；而本项目中的 MAPPO 解决的是“多个智能体在局部可见、集中训练和分散执行条件下，如何稳定地协同更新策略”。
 
-### 5.4 Cross-Attention 让 MAPPO 不再受限于固定长度实体拼接
+### 5.4 当前 MAPPO 使用固定长度观测 MLP
 
-这是本项目里 MAPPO 相比普通 PPO 最容易看见、也最有场景意义的增强之一。  
+当前 MAPPO 不再包含 attention encoder。环境仍然把邻居 UAV 和关联 UE 按固定上限截断、padding 成固定长度观测，并保留实体计数字段；MAPPO actor 将整段 `obs_i` 直接送入 MLP，critic 将展平后的 `share_obs` 直接送入 centralized MLP。
 
-在标准 PPO 中，观测通常被默认当成一段固定长度向量，直接输入 MLP 即可。但在这里，每架 UAV 每个时隙看到的：
+这使 MAPPO 成为清晰的无 attention on-policy 基线。可变长度实体的 mask 聚合能力只保留在 MASAC attention 分支中，用于和 MAPPO/MASAC MLP 基线区分。
 
-- 邻居 UAV 数量不同；
-- 关联 UE 数量不同；
-- 真正重要的实体集合也不同。
-
-如果简单把这些实体截断、补零后直接拼起来，PPO 风格的普通 MLP 很容易把 padding 槽位当成真实信息，或者在观测截断时丢掉关键实体。  
-
-因此，本项目中的 MAPPO 在 actor/critic 前都增加了 `AttentionEncoder`：
-
-1. 先保留邻居数和 UE 数量两个 `count` 字段；
-2. 再根据 `count` 生成 mask；
-3. 用 UAV 自身状态作为 Query，邻居和 UE 特征作为 Key/Value；
-4. 通过 cross-attention 只聚合真实实体信息。
-
-这一步的意义不只是“网络更复杂”，而是**把可变数量实体观测转化成了对策略学习更友好的固定维度表征**。这正是标准 PPO 默认不具备的能力。
-
-### 5.5 One-Hot 身份标识让 critic 从团队价值走向个体价值
+### 5.5 centralized critic 输出 per-agent value
 
 标准 PPO 中，critic 一般只需要回答“当前状态值多少钱”；因为只有一个 agent，所以不需要额外说明“当前在评估谁”。  
 
-但在多 UAV 场景中，哪怕多个 agent 共享同一个团队上下文，也仍然存在明显差异：
-
-- 有的 UAV 更靠近边界，越界风险更高；
-- 有的 UAV 邻居更多，干扰与协作压力更大；
-- 有的 UAV 服务的是密集 UE，时延敏感性更高。
-
-因此，本项目中的 MAPPO 不满足于只用统一的团队 value，而是在 critic 中引入 `one-hot` 身份标识。这样做之后，价值网络可以在共享 `team_context` 的基础上输出 **agent-specific value**，从而实现更细粒度的价值分解，并支持更精细的 **per-agent advantage** 估计。  
-
-从方法论上说，这一步非常关键，因为它让 critic 不再只是“团队总分估计器”，而是变成了“在共享上下文条件下按 agent 条件化的价值评估器”。
+在多 UAV 场景中，当前 MAPPO critic 接收 joint observation 展平后的 `share_obs`，并输出 `[V_1, ..., V_N]`。训练 minibatch 中通过 `agent_index` 取出对应 agent 的 value，再计算 value loss 和 advantage。这个实现没有 one-hot identity embedding，也没有 attention team context。
 
 ### 5.6 为什么说当前版本的 MAPPO 不是“多智能体版 PPO”这么简单
 
 如果只保留 PPO 的 clipped objective、GAE 和 entropy 项，再把多个 agent 的样本简单拼到一起训练，那么它更像是**共享参数的 Independent PPO**。  
 
-而本项目中的增强版 MAPPO比这个更进一步，原因在于它同时解决了两个 PPO 默认不处理的问题：
+当前 MAPPO 比这个更进一步，主要体现在两点：
 
-- **观测结构问题**：通过 cross-attention 解决可变长度实体观测带来的截断与 padding 污染。
-- **价值粒度问题**：通过 `one-hot` 身份标识把 centralized critic 细化成 agent-specific value estimator。
+- **训练范式**：执行时 actor 只看局部观测，训练时 centralized critic 使用所有 UAV 的联合观测。
+- **训练组织**：rollout buffer 记录 per-agent 样本、active mask、share_obs、agent_index、old value 和 old log-prob，支持 masked PPO update。
 
-也就是说，本项目里的 MAPPO 不只是“PPO + 多个 agent”，而是：
+也就是说，本项目里的 MAPPO 是：
 
-`PPO 优化框架 + 多智能体 CTDE + Attention 观测编码 + 身份条件化价值分解`
+`PPO 优化框架 + 多智能体 CTDE + centralized per-agent value critic`
 
 ### 5.7 一个适合汇报的总结口径
 
 如果在答辩、面试或论文介绍里需要用一段简洁的话来解释 MAPPO 与 PPO 的区别，可以直接使用下面这段口径：
 
-> 相比标准 PPO，我这里的 MAPPO 并不是简单把多个智能体的样本放在一起训练。它保留了 PPO 的 clipped update 和 GAE 框架，但针对多 UAV 协同场景增加了两项关键机制：第一，用 `count + mask + cross-attention` 处理邻居 UAV 和关联 UE 数量可变带来的观测截断与 padding 问题；第二，在 centralized critic 中引入 `one-hot` 身份标识，使价值网络能够在共享团队上下文上输出 agent-specific value，从而实现更细粒度的价值分解和 per-agent advantage 估计。也正因为这两步，MAPPO 才真正适合这个低空网络联合轨迹与波束优化问题。 
+> 相比标准 PPO，我这里的 MAPPO 并不是简单把多个智能体的样本放在一起训练。它保留了 PPO 的 clipped update 和 GAE 框架，同时采用集中训练、分散执行：actor 基于单个 UAV 的局部观测决策，critic 在训练时使用展平后的全体 UAV 观测输出 per-agent value。当前 MAPPO 是无 attention 的 MLP 基线，MASAC 才保留可选 attention actor 和 attention critic 分支。
 
 ---
 
@@ -1948,17 +1920,18 @@ q_i = QHead(q_input_i)
 如果动作纯粹在低层特征时汇入，并接连承受多级 `token projection`、`Self-Attention 跨映射` 以及频繁变换的 `LayerNorm` 的削弱，梯度的回传轨迹不仅深远且会在相互注意混排当中发生严重的特征泄露与弥散。这会导致最终指导行动的更新量变得高度浑浊与不可控。
 将没被任何多余干扰过的 $a_i$ 短接绕过复杂结构在最终端拼回输入，可以辟出一条纯净的行动导向快捷连接，使得 Q 头网络提供明确锐利的对应单体的局部动作指导梯度，而 `context_i` 负责继续从旁侧充入深邃的结构化全局协同意识，二者完美互补。
 
-### 6.6 与 MAPPO Attention 的区别
+### 6.6 与 MAPPO critic 的区别
 
-MASAC attention 与 MAPPO attention 共用 `AttentionEncoder`，但 critic 语义不同：
+MASAC attention critic 与当前 MAPPO critic 的语义不同：
 
-| 维度 | MAPPO Attention | MASAC Attention |
+| 维度 | MAPPO | MASAC Attention |
 |------|-----------------|-----------------|
 | 算法类型 | On-policy PPO 框架 | Off-policy SAC 框架 |
 | critic 输出 | per-agent value $V_i$ | per-agent action-value $Q_i$ |
 | critic 输入 | joint observation / share_obs | joint observation + joint action |
-| agent 身份 | `one-hot` 拼接到 value head | learned `agent_id_embedding` 进入 token |
-| agent 关系建模 | team context + identity 条件化 | 可选 agent-level self-attention |
+| attention 使用 | 不使用 attention | 可选 local entity attention 和 agent-level self-attention |
+| agent 身份 | 不使用显式 identity embedding | learned `agent_id_embedding` 进入 token |
+| agent 关系建模 | centralized MLP 从 `share_obs` 中隐式学习 | 可选 agent-level self-attention |
 | 训练目标 | clipped policy objective + GAE | twin Q target + entropy-regularized actor objective |
 
 这一区别必须保持清楚：MASAC critic 不能只看状态，因为 SAC 的 actor 更新需要对当前动作求 Q 梯度；MAPPO critic 则估计 value，用于 advantage 计算。
@@ -2035,4 +2008,4 @@ python plot_comparison.py \
 
 ---
 
-*文档更新：2026年6月4日（已按 MAPPO 与 MASAC attention 当前实现统一整理）*
+*文档更新：2026年6月6日（已按 MAPPO 无 attention、MASAC 保留可选 attention 的当前实现统一整理）*

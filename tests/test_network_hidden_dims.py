@@ -7,8 +7,6 @@ import config
 from marl_models.maddpg.agents import ActorNetwork as MADDPGActor
 from marl_models.maddpg.agents import CriticNetwork as MADDPGCritic
 from marl_models.mappo.agents import ActorNetwork as MAPPOActor
-from marl_models.mappo.agents import AttentionActorNetwork as MAPPOAttentionActor
-from marl_models.mappo.agents import AttentionCriticNetwork as MAPPOAttentionCritic
 from marl_models.mappo.agents import CriticNetwork as MAPPOCritic
 from marl_models.masac.agents import ActorNetwork as MASACActor
 from marl_models.masac.agents import AgentSelfAttentionCriticNetwork as AMASACCritic
@@ -48,8 +46,6 @@ def test_non_attention_algorithms_share_base_critic_hidden_dim() -> None:
 
 
 def test_attention_algorithms_use_attention_specific_head_dims() -> None:
-    mappo_actor = MAPPOAttentionActor(config.OBS_DIM_SINGLE, config.ACTION_DIM).policy
-    mappo_critic = MAPPOAttentionCritic(config.NUM_UAVS, config.OBS_DIM_SINGLE).value_head
     amasac_actor = AMASACActor(config.OBS_DIM_SINGLE, config.ACTION_DIM)
     local_attention_critic = MASACLocalAttentionCritic(
         config.NUM_UAVS,
@@ -58,8 +54,6 @@ def test_attention_algorithms_use_attention_specific_head_dims() -> None:
     )
     amasac_critic = AMASACCritic(config.NUM_UAVS, config.OBS_DIM_SINGLE, config.ACTION_DIM)
 
-    assert mappo_actor.fc1.out_features == config.ATTENTION_ACTOR_HIDDEN_DIM
     assert amasac_actor.fc1.out_features == config.ATTENTION_ACTOR_HIDDEN_DIM
-    assert mappo_critic.fc1.out_features == config.ATTENTION_CRITIC_HIDDEN_DIM
     assert local_attention_critic.fc1.out_features == config.ATTENTION_CRITIC_HIDDEN_DIM
     assert amasac_critic.q_head[0].out_features == config.ATTENTION_CRITIC_HIDDEN_DIM

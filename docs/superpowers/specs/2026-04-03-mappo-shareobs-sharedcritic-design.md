@@ -110,7 +110,7 @@ Important: the attention branch may preserve internal structured processing, but
 - input: flattened `share_obs`
 - output: single scalar value
 
-This keeps the external MAPPO contract aligned while preserving the existing attention encoder investment.
+Historical note: this described an earlier MAPPO attention branch. Current MAPPO no longer uses an attention encoder.
 
 ## Rollout Buffer Changes
 
@@ -232,5 +232,5 @@ The redesign is complete when:
 - critic output is a single scalar value
 - `agent_id` is fully removed from the critic contract
 - rollout buffer no longer uses the current joint-query remapping path
-- MAPPO tests pass under both attention and non-attention critic branches
+- MAPPO tests pass for the single non-attention critic branch
 - the resulting structure is directly explainable as analogous to `on-policy` `share_policy=True`

@@ -1,7 +1,7 @@
 import copy
 
 from marl_models.base_model import MARLModel
-from marl_models.mappo.agents import ActorNetwork, AttentionActorNetwork, AttentionCriticNetwork, CriticNetwork
+from marl_models.mappo.agents import ActorNetwork, CriticNetwork
 from marl_models.mappo.value_norm import ValueNorm
 from marl_models.buffer_and_helpers import masked_mean
 import config
@@ -24,12 +24,8 @@ class MAPPO(MARLModel):
         super().__init__(model_name, num_agents, obs_dim, action_dim, device)
         self.active_flag_index: int = config.OWN_STATE_DIM - 1
 
-        actor_cls = AttentionActorNetwork if config.USE_ATTENTION else ActorNetwork
-        critic_cls = AttentionCriticNetwork if config.USE_ATTENTION else CriticNetwork
-        self.use_attention: bool = actor_cls is AttentionActorNetwork
-
-        self.actors = actor_cls(obs_dim, action_dim).to(device)
-        self.critics = critic_cls(num_agents, obs_dim).to(device)
+        self.actors = ActorNetwork(obs_dim, action_dim).to(device)
+        self.critics = CriticNetwork(num_agents, obs_dim).to(device)
 
         # Create optimizers
         self.actor_optimizer: torch.optim.AdamW = torch.optim.AdamW(self.actors.parameters(), lr=config.MAPPO_ACTOR_LR)
@@ -41,7 +37,6 @@ class MAPPO(MARLModel):
     def _checkpoint_metadata(self) -> dict[str, object]:
         return {
             "model_name": self.model_name,
-            "use_attention": self.use_attention,
             "num_agents": self.num_agents,
             "obs_dim": self.obs_dim,
             "action_dim": self.action_dim,
@@ -55,7 +50,6 @@ class MAPPO(MARLModel):
 
         expected_values = {
             "model_name": self.model_name,
-            "use_attention": self.use_attention,
             "num_agents": self.num_agents,
             "obs_dim": self.obs_dim,
             "action_dim": self.action_dim,

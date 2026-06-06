@@ -42,18 +42,6 @@ def _clone_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Te
     return {name: tensor.detach().clone() for name, tensor in state_dict.items()}
 
 
-def test_attention_actor_outputs_correct_distribution_shape() -> None:
-    from marl_models.mappo.agents import AttentionActorNetwork
-
-    actor = AttentionActorNetwork(config.OBS_DIM_SINGLE, config.ACTION_DIM)
-    obs = torch.from_numpy(_fake_obs())
-    dist = actor(obs)
-
-    assert tuple(dist.mean.shape) == (config.NUM_UAVS, config.ACTION_DIM)
-    assert tuple(dist.stddev.shape) == (config.NUM_UAVS, config.ACTION_DIM)
-    assert tuple(dist.sample().shape) == (config.NUM_UAVS, config.ACTION_DIM)
-
-
 def test_non_attention_actor_outputs_distribution_from_raw_obs() -> None:
     from marl_models.mappo.agents import ActorNetwork
 
@@ -70,26 +58,6 @@ def test_non_attention_actor_outputs_distribution_from_raw_obs() -> None:
     assert actor.policy.ln1.normalized_shape == (config.BASE_ACTOR_HIDDEN_DIM,)
     assert actor.policy.ln2.normalized_shape == (config.BASE_ACTOR_HIDDEN_DIM,)
     assert isinstance(actor.policy.activation, torch.nn.SiLU)
-
-
-def test_attention_critic_outputs_one_value_per_agent() -> None:
-    from marl_models.mappo.agents import AttentionCriticNetwork
-
-    critic = AttentionCriticNetwork(config.NUM_UAVS, config.OBS_DIM_SINGLE)
-    share_obs = torch.stack(
-        [
-            torch.from_numpy(_flatten_share_obs(_make_distinct_joint_obs(0))),
-            torch.from_numpy(_flatten_share_obs(_make_distinct_joint_obs(1))),
-        ],
-        dim=0,
-    )
-
-    values = critic(share_obs)
-
-    assert not hasattr(critic, "agent_pooling")
-    assert critic.value_head.fc1.in_features == config.NUM_UAVS * critic.encoder.output_dim
-    assert not hasattr(critic, "conditioner")
-    assert tuple(values.shape) == (2, config.NUM_UAVS)
 
 
 def test_critic_accepts_flattened_share_obs_and_returns_vector_values() -> None:
@@ -109,15 +77,12 @@ def test_critic_accepts_flattened_share_obs_and_returns_vector_values() -> None:
     assert isinstance(critic.value_head.activation, torch.nn.SiLU)
 
 
-def test_mappo_constructor_selects_attention_and_non_attention_branches(monkeypatch) -> None:
+def test_mappo_constructor_uses_only_non_attention_networks() -> None:
     from marl_models.mappo.agents import ActorNetwork
-    from marl_models.mappo.agents import AttentionActorNetwork
-    from marl_models.mappo.agents import AttentionCriticNetwork
     from marl_models.mappo.agents import CriticNetwork
 
     obs = _fake_obs()
 
-    monkeypatch.setattr(config, "USE_ATTENTION", False)
     model = MAPPO(
         model_name="mappo",
         num_agents=config.NUM_UAVS,
@@ -134,26 +99,8 @@ def test_mappo_constructor_selects_attention_and_non_attention_branches(monkeypa
     assert tuple(log_probs.shape) == (config.NUM_UAVS,)
     assert tuple(values.shape) == (config.NUM_UAVS,)
 
-    monkeypatch.setattr(config, "USE_ATTENTION", True)
-    model = MAPPO(
-        model_name="mappo",
-        num_agents=config.NUM_UAVS,
-        obs_dim=config.OBS_DIM_SINGLE,
-        action_dim=config.ACTION_DIM,
-        device="cpu",
-    )
-    assert isinstance(model.actors, AttentionActorNetwork)
-    assert isinstance(model.critics, AttentionCriticNetwork)
-    assert hasattr(model, "value_normalizer")
-    env_actions, raw_actions, log_probs, values = model.get_action_and_value(obs)
-    assert tuple(env_actions.shape) == (config.NUM_UAVS, config.ACTION_DIM)
-    assert tuple(raw_actions.shape) == (config.NUM_UAVS, config.ACTION_DIM)
-    assert tuple(log_probs.shape) == (config.NUM_UAVS,)
-    assert tuple(values.shape) == (config.NUM_UAVS,)
 
-
-def test_mappo_uses_algorithm_specific_actor_lr(monkeypatch) -> None:
-    monkeypatch.setattr(config, "USE_ATTENTION", False)
+def test_mappo_uses_algorithm_specific_actor_lr() -> None:
     model = MAPPO(
         model_name="mappo",
         num_agents=config.NUM_UAVS,
@@ -165,38 +112,35 @@ def test_mappo_uses_algorithm_specific_actor_lr(monkeypatch) -> None:
     assert model.actor_optimizer.defaults["lr"] == config.MAPPO_ACTOR_LR
 
 
-def test_mappo_get_action_and_value_flattens_share_obs_for_critic(monkeypatch) -> None:
+def test_mappo_get_action_and_value_flattens_share_obs_for_critic() -> None:
     obs = _fake_obs()
     expected_shape = (1, config.NUM_UAVS * config.OBS_DIM_SINGLE)
 
-    for use_attention in (False, True):
-        monkeypatch.setattr(config, "USE_ATTENTION", use_attention)
-        model = MAPPO(
-            model_name="mappo",
-            num_agents=config.NUM_UAVS,
-            obs_dim=config.OBS_DIM_SINGLE,
-            action_dim=config.ACTION_DIM,
-            device="cpu",
-        )
+    model = MAPPO(
+        model_name="mappo",
+        num_agents=config.NUM_UAVS,
+        obs_dim=config.OBS_DIM_SINGLE,
+        action_dim=config.ACTION_DIM,
+        device="cpu",
+    )
 
-        original_forward = model.critics.forward
-        captured: dict[str, tuple[int, ...] | None] = {
-            "share_obs_shape": None,
-        }
+    original_forward = model.critics.forward
+    captured: dict[str, tuple[int, ...] | None] = {
+        "share_obs_shape": None,
+    }
 
-        def wrapped_forward(share_obs: torch.Tensor) -> torch.Tensor:
-            captured["share_obs_shape"] = tuple(share_obs.shape)
-            return original_forward(share_obs)
+    def wrapped_forward(share_obs: torch.Tensor) -> torch.Tensor:
+        captured["share_obs_shape"] = tuple(share_obs.shape)
+        return original_forward(share_obs)
 
-        model.critics.forward = wrapped_forward  # type: ignore[method-assign]
-        _env_actions, _raw_actions, _log_probs, values = model.get_action_and_value(obs)
+    model.critics.forward = wrapped_forward  # type: ignore[method-assign]
+    _env_actions, _raw_actions, _log_probs, values = model.get_action_and_value(obs)
 
-        assert tuple(values.shape) == (config.NUM_UAVS,)
-        assert captured["share_obs_shape"] == expected_shape
+    assert tuple(values.shape) == (config.NUM_UAVS,)
+    assert captured["share_obs_shape"] == expected_shape
 
 
-def test_critics_accept_flattened_share_obs_for_both_branches() -> None:
-    from marl_models.mappo.agents import AttentionCriticNetwork
+def test_critic_accepts_flattened_share_obs() -> None:
     from marl_models.mappo.agents import CriticNetwork
 
     share_obs = torch.stack(
@@ -208,10 +152,9 @@ def test_critics_accept_flattened_share_obs_for_both_branches() -> None:
         dim=0,
     )
 
-    for critic_cls in (CriticNetwork, AttentionCriticNetwork):
-        critic = critic_cls(config.NUM_UAVS, config.OBS_DIM_SINGLE)
-        values = critic(share_obs)
-        assert tuple(values.shape) == (3, config.NUM_UAVS)
+    critic = CriticNetwork(config.NUM_UAVS, config.OBS_DIM_SINGLE)
+    values = critic(share_obs)
+    assert tuple(values.shape) == (3, config.NUM_UAVS)
 
 
 def test_rollout_buffer_emits_share_obs_per_flat_sample() -> None:
@@ -280,72 +223,67 @@ def test_rollout_buffer_emits_share_obs_per_flat_sample() -> None:
     assert len(seen_pairs) == 2 * config.NUM_UAVS
 
 
-def test_mappo_rollout_uses_vector_value_outputs(monkeypatch) -> None:
+def test_mappo_rollout_uses_vector_value_outputs() -> None:
     obs = _fake_obs()
 
-    for use_attention in (False, True):
-        monkeypatch.setattr(config, "USE_ATTENTION", use_attention)
-        model = MAPPO(
-            model_name="mappo",
-            num_agents=config.NUM_UAVS,
-            obs_dim=config.OBS_DIM_SINGLE,
-            action_dim=config.ACTION_DIM,
-            device="cpu",
-        )
+    model = MAPPO(
+        model_name="mappo",
+        num_agents=config.NUM_UAVS,
+        obs_dim=config.OBS_DIM_SINGLE,
+        action_dim=config.ACTION_DIM,
+        device="cpu",
+    )
 
-        original_forward = model.critics.forward
+    original_forward = model.critics.forward
 
-        def wrapped_forward(share_obs: torch.Tensor) -> torch.Tensor:
-            assert tuple(share_obs.shape) == (1, config.NUM_UAVS * config.OBS_DIM_SINGLE)
-            return torch.arange(config.NUM_UAVS, dtype=torch.float32, device=share_obs.device).unsqueeze(0)
+    def wrapped_forward(share_obs: torch.Tensor) -> torch.Tensor:
+        assert tuple(share_obs.shape) == (1, config.NUM_UAVS * config.OBS_DIM_SINGLE)
+        return torch.arange(config.NUM_UAVS, dtype=torch.float32, device=share_obs.device).unsqueeze(0)
 
-        model.critics.forward = wrapped_forward  # type: ignore[method-assign]
-        _env_actions, _raw_actions, _log_probs, values = model.get_action_and_value(obs)
-        model.critics.forward = original_forward  # type: ignore[method-assign]
+    model.critics.forward = wrapped_forward  # type: ignore[method-assign]
+    _env_actions, _raw_actions, _log_probs, values = model.get_action_and_value(obs)
+    model.critics.forward = original_forward  # type: ignore[method-assign]
 
-        assert tuple(values.shape) == (config.NUM_UAVS,)
-        assert np.allclose(values, np.arange(config.NUM_UAVS, dtype=np.float32))
+    assert tuple(values.shape) == (config.NUM_UAVS,)
+    assert np.allclose(values, np.arange(config.NUM_UAVS, dtype=np.float32))
 
-def test_mappo_update_minibatch_uses_share_obs(monkeypatch) -> None:
+def test_mappo_update_minibatch_uses_share_obs() -> None:
     torch.manual_seed(7)
     obs = _make_training_obs()
     share_obs = _flatten_share_obs(obs)
 
-    for use_attention in (False, True):
-        monkeypatch.setattr(config, "USE_ATTENTION", use_attention)
-        model = MAPPO(
-            model_name="mappo",
-            num_agents=config.NUM_UAVS,
-            obs_dim=config.OBS_DIM_SINGLE,
-            action_dim=config.ACTION_DIM,
-            device="cpu",
-        )
+    model = MAPPO(
+        model_name="mappo",
+        num_agents=config.NUM_UAVS,
+        obs_dim=config.OBS_DIM_SINGLE,
+        action_dim=config.ACTION_DIM,
+        device="cpu",
+    )
 
-        env_actions, raw_actions, log_probs, values = model.get_action_and_value(obs)
-        batch_size = config.NUM_UAVS
-        batch = {
-            "obs": torch.from_numpy(obs),
-            "share_obs": torch.from_numpy(np.repeat(share_obs[None, :], batch_size, axis=0)),
-            "agent_index": torch.arange(config.NUM_UAVS, dtype=torch.long),
-            "raw_actions": torch.from_numpy(raw_actions),
-            "old_log_probs": torch.from_numpy(log_probs),
-            "advantages": torch.full((batch_size,), 0.25, dtype=torch.float32),
-            "returns": torch.from_numpy(values).float() + 0.5,
-            "old_values": torch.from_numpy(values).float(),
-            "active_mask": torch.ones(batch_size, dtype=torch.float32),
-        }
+    env_actions, raw_actions, log_probs, values = model.get_action_and_value(obs)
+    batch_size = config.NUM_UAVS
+    batch = {
+        "obs": torch.from_numpy(obs),
+        "share_obs": torch.from_numpy(np.repeat(share_obs[None, :], batch_size, axis=0)),
+        "agent_index": torch.arange(config.NUM_UAVS, dtype=torch.long),
+        "raw_actions": torch.from_numpy(raw_actions),
+        "old_log_probs": torch.from_numpy(log_probs),
+        "advantages": torch.full((batch_size,), 0.25, dtype=torch.float32),
+        "returns": torch.from_numpy(values).float() + 0.5,
+        "old_values": torch.from_numpy(values).float(),
+        "active_mask": torch.ones(batch_size, dtype=torch.float32),
+    }
 
-        stats = model._update_minibatch(batch)
+    stats = model._update_minibatch(batch)
 
-        assert tuple(env_actions.shape) == (config.NUM_UAVS, config.ACTION_DIM)
-        assert stats["valid_samples"] == float(config.NUM_UAVS)
-        assert stats["critic_loss"] >= 0.0
-        assert torch.isfinite(torch.tensor(stats["actor_loss"]))
-        assert torch.isfinite(torch.tensor(stats["critic_loss"]))
+    assert tuple(env_actions.shape) == (config.NUM_UAVS, config.ACTION_DIM)
+    assert stats["valid_samples"] == float(config.NUM_UAVS)
+    assert stats["critic_loss"] >= 0.0
+    assert torch.isfinite(torch.tensor(stats["actor_loss"]))
+    assert torch.isfinite(torch.tensor(stats["critic_loss"]))
 
 
-def test_mappo_critic_loss_uses_value_normalizer(monkeypatch) -> None:
-    monkeypatch.setattr(config, "USE_ATTENTION", False)
+def test_mappo_critic_loss_uses_value_normalizer() -> None:
     model = MAPPO(
         model_name="mappo",
         num_agents=config.NUM_UAVS,
@@ -380,8 +318,7 @@ def test_mappo_critic_loss_uses_value_normalizer(monkeypatch) -> None:
     assert not torch.allclose(mean_before, mean_after)
 
 
-def test_mappo_load_round_trips_checkpoint_state(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(config, "USE_ATTENTION", True)
+def test_mappo_load_round_trips_checkpoint_state(tmp_path) -> None:
     model = MAPPO(
         model_name="mappo",
         num_agents=config.NUM_UAVS,
@@ -392,7 +329,6 @@ def test_mappo_load_round_trips_checkpoint_state(monkeypatch, tmp_path) -> None:
     saved_actor_state = _clone_state_dict(model.actors.state_dict())
     saved_critic_state = _clone_state_dict(model.critics.state_dict())
 
-    monkeypatch.setattr(config, "USE_ATTENTION", False)
     model.save(str(tmp_path))
 
     with torch.no_grad():
@@ -401,7 +337,6 @@ def test_mappo_load_round_trips_checkpoint_state(monkeypatch, tmp_path) -> None:
         for parameter in model.critics.parameters():
             parameter.sub_(1.0)
 
-    monkeypatch.setattr(config, "USE_ATTENTION", True)
     model.load(str(tmp_path))
 
     for name, tensor in model.actors.state_dict().items():
@@ -410,8 +345,7 @@ def test_mappo_load_round_trips_checkpoint_state(monkeypatch, tmp_path) -> None:
         assert torch.allclose(tensor, saved_critic_state[name])
 
 
-def test_mappo_load_rejects_incompatible_checkpoint_metadata(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(config, "USE_ATTENTION", True)
+def test_mappo_load_rejects_incompatible_checkpoint_metadata(tmp_path) -> None:
     source_model = MAPPO(
         model_name="mappo",
         num_agents=config.NUM_UAVS,
@@ -421,7 +355,10 @@ def test_mappo_load_rejects_incompatible_checkpoint_metadata(monkeypatch, tmp_pa
     )
     source_model.save(str(tmp_path))
 
-    monkeypatch.setattr(config, "USE_ATTENTION", False)
+    checkpoint = torch.load(tmp_path / "mappo.pth", map_location="cpu")
+    checkpoint["metadata"]["num_agents"] = config.NUM_UAVS + 1
+    torch.save(checkpoint, tmp_path / "mappo.pth")
+
     target_model = MAPPO(
         model_name="mappo",
         num_agents=config.NUM_UAVS,
@@ -434,13 +371,12 @@ def test_mappo_load_rejects_incompatible_checkpoint_metadata(monkeypatch, tmp_pa
         target_model.load(str(tmp_path))
     except ValueError as exc:
         assert "checkpoint" in str(exc).lower()
-        assert "attention" in str(exc).lower()
+        assert "num_agents" in str(exc).lower()
     else:
         raise AssertionError("Expected load() to reject incompatible checkpoint metadata")
 
 
-def test_mappo_load_rolls_back_when_critic_load_fails(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(config, "USE_ATTENTION", False)
+def test_mappo_load_rolls_back_when_critic_load_fails(tmp_path) -> None:
     model = MAPPO(
         model_name="mappo",
         num_agents=config.NUM_UAVS,

@@ -70,18 +70,16 @@ def test_obsolete_maddpg_attention_pooling_symbols_are_removed() -> None:
     assert not hasattr(attention_module, "AgentPoolingValue")
 
 
-def test_maddpg_ignores_attention_flag_and_uses_standard_networks(monkeypatch) -> None:
-    for use_attention in (False, True):
-        monkeypatch.setattr(config, "USE_ATTENTION", use_attention)
-        model = MADDPG("maddpg", num_agents=3, obs_dim=8, action_dim=2, device="cpu")
+def test_maddpg_uses_standard_networks_without_attention_branch() -> None:
+    model = MADDPG("maddpg", num_agents=3, obs_dim=8, action_dim=2, device="cpu")
 
-        assert isinstance(model.actor, ActorNetwork)
-        assert isinstance(model.target_actor, ActorNetwork)
-        assert isinstance(model.critic, CriticNetwork)
-        assert isinstance(model.target_critic, CriticNetwork)
-        assert not hasattr(model, "shared_encoder")
-        assert not hasattr(model, "target_shared_encoder")
-        assert not hasattr(model, "shared_encoder_optimizer")
+    assert isinstance(model.actor, ActorNetwork)
+    assert isinstance(model.target_actor, ActorNetwork)
+    assert isinstance(model.critic, CriticNetwork)
+    assert isinstance(model.target_critic, CriticNetwork)
+    assert not hasattr(model, "shared_encoder")
+    assert not hasattr(model, "target_shared_encoder")
+    assert not hasattr(model, "shared_encoder_optimizer")
 
 
 def test_maddpg_registers_shared_modules_in_state_dict() -> None:
@@ -427,8 +425,7 @@ def test_maddpg_load_does_not_mutate_state_when_noise_scale_validation_fails(tmp
     assert [noise.scale for noise in target.noise] == original_noise_scales
 
 
-def test_maddpg_update_runs_without_attention_branch(monkeypatch) -> None:
-    monkeypatch.setattr(config, "USE_ATTENTION", True)
+def test_maddpg_update_runs_without_attention_branch() -> None:
     model = MADDPG("maddpg", num_agents=2, obs_dim=8, action_dim=2, device="cpu")
     batch = _make_batch(batch_size=4, num_agents=2, obs_dim=8, action_dim=2)
 

@@ -62,7 +62,7 @@ MASAC_CRITIC_MODE="agent_self_attention"
     new critic: encode each o_i, build per-agent tokens from h_i/a_i/id_i, masked self-attention, QHead -> [Q_i]
 ```
 
-Keep `USE_ATTENTION` only as a legacy/global default if needed. MASAC model construction should prefer MASAC-specific flags so ablations are explicit.
+Do not use a global `USE_ATTENTION` flag. MASAC model construction uses MASAC-specific flags so ablations are explicit.
 
 ## 3. Network Design
 

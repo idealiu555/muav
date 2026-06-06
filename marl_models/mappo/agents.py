@@ -4,7 +4,6 @@ import torch.nn as nn
 from torch.distributions import Normal
 
 import config
-from marl_models.attention import AttentionEncoder
 
 # Added layer normalization and orthogonal initialization for better training stability
 
@@ -22,18 +21,6 @@ def _validate_share_obs(share_obs: torch.Tensor, num_agents: int, obs_dim: int) 
     expected_dim = num_agents * obs_dim
     if share_obs.shape[1] != expected_dim:
         raise ValueError(f"Expected share_obs trailing dim {expected_dim}, got {share_obs.shape[1]}")
-
-
-def _validate_attention_obs_dim(obs_dim: int) -> None:
-    if obs_dim != config.OBS_DIM_SINGLE:
-        raise ValueError(
-            f"Attention MAPPO expects obs_dim {config.OBS_DIM_SINGLE}, got {obs_dim}"
-        )
-
-
-def _reshape_share_obs(share_obs: torch.Tensor, num_agents: int, obs_dim: int) -> torch.Tensor:
-    _validate_share_obs(share_obs, num_agents, obs_dim)
-    return share_obs.reshape(share_obs.shape[0], num_agents, obs_dim)
 
 
 class _GaussianPolicyHead(nn.Module):
@@ -88,18 +75,6 @@ class ActorNetwork(nn.Module):
         return self.policy(obs)
 
 
-class AttentionActorNetwork(nn.Module):
-    def __init__(self, obs_dim: int, action_dim: int) -> None:
-        super().__init__()
-        _validate_attention_obs_dim(obs_dim)
-        self.encoder = AttentionEncoder()
-        self.policy = _GaussianPolicyHead(self.encoder.output_dim, action_dim, config.ATTENTION_ACTOR_HIDDEN_DIM)
-
-    def forward(self, obs: torch.Tensor) -> Normal:
-        encoded = self.encoder(obs)
-        return self.policy(encoded)
-
-
 class CriticNetwork(nn.Module):
     def __init__(self, num_agents: int, obs_dim: int) -> None:
         super().__init__()
@@ -112,25 +87,3 @@ class CriticNetwork(nn.Module):
         _validate_share_obs(share_obs, self.num_agents, self.obs_dim)
         return self.value_head(share_obs)
 
-
-class AttentionCriticNetwork(nn.Module):
-    def __init__(self, num_agents: int, obs_dim: int) -> None:
-        super().__init__()
-        _validate_attention_obs_dim(obs_dim)
-        self.num_agents = num_agents
-        self.obs_dim = obs_dim
-        self.encoder = AttentionEncoder()
-        self.encoded_share_obs_dim = num_agents * self.encoder.output_dim
-        self.value_head = _VectorValueHead(
-            self.encoded_share_obs_dim,
-            num_agents,
-            config.ATTENTION_CRITIC_HIDDEN_DIM,
-        )
-
-    def forward(self, share_obs: torch.Tensor) -> torch.Tensor:
-        joint_obs = _reshape_share_obs(share_obs, self.num_agents, self.obs_dim)
-        batch_size = joint_obs.shape[0]
-        encoded = self.encoder(joint_obs.reshape(batch_size * self.num_agents, self.obs_dim))
-        agent_encodings = encoded.reshape(batch_size, self.num_agents, self.encoder.output_dim)
-        team_context = agent_encodings.reshape(batch_size, self.encoded_share_obs_dim)
-        return self.value_head(team_context)
