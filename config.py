@@ -49,7 +49,7 @@ UNSAFE_UAV_DISTANCE: float = 50.0
 COLLISION_DISTANCE: float = 5.0
 UNSAFE_PROXIMITY_PENALTY: float = 4.0
 COLLISION_FAILURE_PENALTY: float = 10.0
-BOUNDARY_PENALTY: float = 2.0
+BOUNDARY_PENALTY: float = 4.0
 NON_SERVED_LATENCY_PENALTY: float = 60.0  # penalty in latency for non-served requests
 # IMPORTANT : Reconfigurable, should try for various values including : NUM_UAVS - 1 and NUM_UES
 MAX_UAV_NEIGHBORS: int = min(4, NUM_UAVS - 1)
